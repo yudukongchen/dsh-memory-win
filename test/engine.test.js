@@ -12,8 +12,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 
-import { appendMemory, correctMemory, listLayer, searchMemory, writeChainSize } from "../lib/engine.js";
-import { PROJECT_DIR_NAME, globalRoot } from "../lib/paths.js";
+import { INLINE_MAX_ENTRIES, appendMemory, correctMemory, listLayer, searchMemory, writeChainSize } from "../lib/engine.js";
+import { PROJECT_DIR_NAME, globalRoot, isAbsoluteAny } from "../lib/paths.js";
+import { renderMap } from "../lib/map.js";
 
 const savedDshHome = process.env.DSH_HOME;
 let sandbox;
@@ -433,4 +434,123 @@ test("id 在同一文件内唯一，且由内容决定（同一内容同一天 i
   await appendMemory({ target: "global", shard: "ids2", fact: "内容甲", date: "2026-01-01" });
   const other = listLayer("global", projectCwd).shards.find((s) => s.name === "ids2").entries[0];
   assert.equal(other.id, entries.find((e) => e.text === "内容甲").id);
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// P2a：片路径相对化（省地图字符）
+// ══════════════════════════════════════════════════════════════════════════════
+
+test("P2a：片路径以**层目录**为基准相对化，只剩文件名", async () => {
+  await appendMemory({ target: "global", shard: "alpha", fact: "一条", date: "2026-01-01" });
+  await appendMemory({ target: "project", cwd: projectCwd, shard: "beta", fact: "一条", date: "2026-01-01" });
+
+  const global = listLayer("global", projectCwd);
+  const project = listLayer("project", projectCwd);
+
+  // 全局层：片路径就是文件名（层目录由 dirPath 给出）
+  assert.equal(global.shards[0].path, "alpha.md");
+  assert.equal(global.shards[0].absPath, join(globalRoot(), "alpha.md"), "absPath 仍须是绝对路径");
+  // 项目层同理
+  assert.equal(project.shards[0].path, "beta.md");
+  // 层目录本身仍相对会话 cwd（项目层因此是 .agent-memory）
+  assert.equal(project.dirPath, PROJECT_DIR_NAME);
+});
+
+test("P2a 配套：memory_search 必须返回**绝对**路径（否则 read 会解析到 cwd 下读不到）", async () => {
+  await appendMemory({ target: "global", shard: "s", fact: "独特词 紫貂", date: "2026-01-01" });
+  const hit = searchMemory("紫貂", { cwd: projectCwd, target: "global" }).hits[0];
+  assert.equal(isAbsoluteAny(hit.path), true, `search 命中必须给绝对路径，实际 ${hit.path}`);
+  assert.equal(hit.path, join(globalRoot(), "s.md"));
+});
+
+test("P2a：地图档下片行长度显著下降", async () => {
+  // 造到超过内联阈值以进入地图档
+  for (let i = 0; i <= INLINE_MAX_ENTRIES; i += 1) {
+    await appendMemory({
+      target: "global",
+      shard: "big",
+      fact: `填充 ${i}`,
+      date: "2026-01-01",
+      keywords: i === 0 ? "关键词甲 关键词乙" : undefined,
+    });
+  }
+  const map = renderMap({ cwd: projectCwd });
+  const line = map.split("\n").find((l) => l.startsWith("- big："));
+  assert.ok(line, "应出现片级地图行");
+  assert.equal(line.includes(globalRoot()), false, "片行不应再含完整层目录");
+  assert.match(line, /big\.md/, "应给层内相对路径");
+  assert.ok(line.length < 100, `片行应显著变短，实际 ${line.length} 字符`);
+  assert.match(line, /关键词甲 关键词乙/, "关键词应出现在片行里");
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// P2b：片级关键词只在新建分片时可设
+// ══════════════════════════════════════════════════════════════════════════════
+
+test("P2b：新建分片带 keywords → 写入首行关键词头", async () => {
+  const r = await appendMemory({
+    target: "global",
+    shard: "kw",
+    fact: "一条",
+    date: "2026-01-01",
+    keywords: "pwsh 路径 引号",
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.warning, undefined, "给了关键词就不该有 warning");
+
+  const text = readFileSync(join(globalRoot(), "kw.md"), "utf8");
+  assert.match(text.split("\n")[0], /^<!-- kw ·  pwsh 路径 引号 -->$/);
+  assert.equal(text.split("\n")[1], "", "头行后应有空行");
+  // 关键词要真的能被读回来
+  assert.equal(listLayer("global", projectCwd).shards[0].keywords, "pwsh 路径 引号");
+});
+
+test("P2b：新建分片不给 keywords → 回 warning 但不阻断写入", async () => {
+  const r = await appendMemory({ target: "global", shard: "nokw", fact: "一条", date: "2026-01-01" });
+  assert.equal(r.ok, true, "warning 不应阻断写入");
+  assert.match(r.warning, /未提供 keywords/);
+  assert.equal(listLayer("global", projectCwd).shards[0].keywords, "");
+});
+
+test("P2b：已存在的分片传 keywords → 被拒（避免改写首行）", async () => {
+  await appendMemory({ target: "global", shard: "exist", fact: "第一条", date: "2026-01-01" });
+  const before = readFileSync(join(globalRoot(), "exist.md"), "utf8");
+
+  await assert.rejects(
+    () => appendMemory({ target: "global", shard: "exist", fact: "第二条", date: "2026-01-02", keywords: "新词" }),
+    /新建分片/,
+  );
+  assert.equal(readFileSync(join(globalRoot(), "exist.md"), "utf8"), before, "被拒时不得改动文件");
+});
+
+test("P2b：keywords 校验（换行 / --> / · / 超长），失败时不留残留文件", async () => {
+  for (const [bad, re] of [
+    ["a\nb", /单行/],
+    ["a-->b", /-->/],
+    ["a·b", /·/],
+    ["x".repeat(121), /超过 120 字符/],
+  ]) {
+    await assert.rejects(
+      () => appendMemory({ target: "global", shard: "kwbad", fact: "一条", date: "2026-01-01", keywords: bad }),
+      re,
+    );
+  }
+  assert.equal(existsSync(join(globalRoot(), "kwbad.md")), false, "校验失败不得留下文件");
+});
+
+test("P2b：只有关键词头、0 条目的文件仍算新建，可补 keywords", async () => {
+  const { writeFileSync, mkdirSync } = await import("node:fs");
+  mkdirSync(globalRoot(), { recursive: true });
+  writeFileSync(join(globalRoot(), "empty.md"), "<!-- empty ·  -->\n", "utf8");
+
+  const r = await appendMemory({
+    target: "global",
+    shard: "empty",
+    fact: "首条",
+    date: "2026-01-01",
+    keywords: "补上 主题",
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.warning, undefined);
+  assert.match(readFileSync(join(globalRoot(), "empty.md"), "utf8"), /<!-- empty ·  补上 主题 -->/);
 });
