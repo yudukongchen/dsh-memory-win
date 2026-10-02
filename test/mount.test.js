@@ -256,16 +256,24 @@ test("段文本函数永不抛错（渲染失败也必须降级为可见提示�
   assert.match(text, /dsh-memory-win/);
 });
 
-test("优先使用 tools.guard()，且守卫只拦 write/edit 对记忆目录的直写", () => {
+test("两条守卫路径**同时**挂载（不是二选一）", () => {
   const { ctx, record } = fakeCtx();
   apply(ctx);
-  assert.equal(record.guards.length, 1, "应注册一个工具守卫");
-  assert.equal(record.listeners.length, 0, "有 guard 时不应再挂 pre-execute");
+  // 回归：早期实现是 if (tools.guard) 用 guard; else 用 pre-execute —— 二选一，
+  // 导致 DSH 有 guard 时项目层分支从不执行、<repo>/.dsh-memory 的直写不被拦。
+  // 该绕过硬真实宿主实测确认后改成两条都挂。
+  assert.equal(record.guards.length, 1, "应注册单调守卫");
+  assert.equal(record.listeners.length, 1, "同时应挂 pre-execute waterfall");
+  assert.equal(record.listeners[0].event, "tools/pre-execute");
+});
 
+test("同步 guard 覆盖**全局层**：命中即返回拒绝原因字符串", () => {
+  const { ctx, record } = fakeCtx();
+  apply(ctx);
   const guard = record.guards[0];
   const memoryFile = join(fakeHome, "memory-win", "global", "x.md");
 
-  // 命中：直写记忆文件 → 返回拒绝原因字符串（契约 3）
+  // 契约 3：返回值是拒绝原因字符串
   const denied = guard({ name: "write", arguments: { file_path: memoryFile } });
   assert.equal(typeof denied, "string");
   assert.match(denied, /memory_add/);
@@ -280,12 +288,35 @@ test("优先使用 tools.guard()，且守卫只拦 write/edit 对记忆目录的
   assert.equal(guard(undefined), undefined);
 });
 
-test("宿主没有 tools.guard 时回落到 tools/pre-execute waterfall", async () => {
+test("同步 guard 也覆盖**项目层**（exec.agent 提供 cwd 时）", () => {
+  const { ctx, record } = fakeCtx();
+  apply(ctx);
+  const guard = record.guards[0];
+
+  // 这正是上面那条回归缺陷的现场：项目层文件在修复前会被放行。
+  const projectMemory = join(projectCwd, ".dsh-memory", "default.md");
+  const withAgent = {
+    name: "write",
+    arguments: { file_path: projectMemory },
+    agent: { session: { header: { cwd: projectCwd } } },
+  };
+  const denied = guard(withAgent);
+  assert.equal(typeof denied, "string", "项目层直写必须被同步 guard 拦住");
+  assert.match(denied, /memory_add/);
+
+  // 拿不到 cwd 时只检查全局层、不猜路径（项目层交由 waterfall 兜底）
+  assert.equal(guard({ name: "write", arguments: { file_path: projectMemory } }), undefined);
+
+  // 别的仓库的项目层目录不属于本会话，不应被拦
+  const otherRepo = join(sandbox, "other-repo", ".dsh-memory", "x.md");
+  assert.equal(guard({ name: "write", arguments: { file_path: otherRepo }, agent: withAgent.agent }), undefined);
+});
+
+test("waterfall 路径同样覆盖项目层，且在守卫异常时无副作用放行", async () => {
   const { ctx, record } = fakeCtx({ withGuard: false });
   apply(ctx);
-  assert.equal(record.guards.length, 0);
-  assert.equal(record.listeners.length, 1);
-  assert.equal(record.listeners[0].event, "tools/pre-execute");
+  assert.equal(record.guards.length, 0, "无 guard() 时不注册单调守卫");
+  assert.equal(record.listeners.length, 1, "仍必须挂 waterfall");
 
   const guard = record.listeners[0].listener;
   let nextCalled = 0;
@@ -294,7 +325,6 @@ test("宿主没有 tools.guard 时回落到 tools/pre-execute waterfall", async 
     return { kind: "allow" };
   };
 
-  // 项目层直写：fallback 路径能拿到 cwd，因此必须拦住（这是 guard() 路径覆盖不到的部分）
   const projectMemory = join(projectCwd, ".dsh-memory", "default.md");
   const decision = await guard(
     { name: "edit", arguments: { file_path: projectMemory }, agent: { session: { header: { cwd: projectCwd } } } },

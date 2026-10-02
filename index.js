@@ -87,21 +87,40 @@ export function apply(ctx) {
     "dsh-memory-win: memory tools",
   );
 
-  // ── 3. 写入守卫 ──────────────────────────────────────────────────────────
-  // 优先用 `tools.guard()`：单调守卫，**无法被后续监听者 force-allow**，
-  // 比 waterfall 事件更难绕过。旧宿主没有该方法时回落到 `tools/pre-execute`。
+  // ── 3. 写入守卫（两条路径**同时**挂，取并集）──────────────────────────────
   //
-  // 两条路径的覆盖面**不同，且这一点被显式声明**（见 lib/guard.js）：
-  // guard() 的回调只拿到 execution、没有可靠的 cwd，因此它只拦**全局层**；
-  // 项目层的直写由 waterfall 那条路径覆盖（它能拿到 agent → cwd）。
+  // 早期这里写的是 `if (tools.guard) {...} else { pre-execute }` —— 二选一，
+  // 结果因为 DSH 有 tools.guard，项目层那条分支从不执行，
+  // `<repo>/.dsh-memory/*.md` 的直写完全不被拦（真实宿主实测到）。
+  // 教训：**单调性更强 ≠ 覆盖面更广**，两个机制不是替代关系。
+  //
+  // 现在两条都挂：
+  //   · `tools.guard()`      —— 单调，无法被后续监听者 force-allow；
+  //   · `tools/pre-execute`  —— waterfall，兼容没有 guard() 的旧宿主。
+  // 判定逻辑共用 `directWriteDenial`（见 lib/guard.js），两条路径覆盖面一致。
+  // 宿主按注册顺序取**第一个**非空 deny，所以重复挂不会产生重复拒绝。
   ctx.effect(
     () => {
       const tools = ctx.get("tools");
+      const disposers = [];
+
       if (tools !== undefined && typeof tools.guard === "function") {
         const dispose = tools.guard((execution) => directWriteDenial(execution));
-        return typeof dispose === "function" ? dispose : () => {};
+        if (typeof dispose === "function") disposers.push(dispose);
       }
-      return ctx.on("tools/pre-execute", preExecuteGuard);
+
+      const off = ctx.on("tools/pre-execute", preExecuteGuard);
+      if (typeof off === "function") disposers.push(off);
+
+      return () => {
+        for (const dispose of disposers) {
+          try {
+            dispose();
+          } catch {
+            /* 卸载期的失败无需上抛 */
+          }
+        }
+      };
     },
     "dsh-memory-win: memory write guard",
   );
