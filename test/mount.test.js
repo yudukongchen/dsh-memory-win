@@ -86,6 +86,8 @@ function fakeCtx(options = {}) {
         record.cleaned += 1;
       };
     },
+    // 插件现在用 `ctx.tools` 点号访问（inject 保证就绪）；`get` 仅为兼容保留。
+    tools,
     get(key) {
       return key === "tools" ? tools : undefined;
     },
@@ -102,10 +104,14 @@ function fakeCtx(options = {}) {
   return { ctx, record };
 }
 
-test("插件元数据符合宿主约定", () => {
+test("插件元数据符合宿主约定：tools 必须在 inject 里", () => {
   assert.equal(pluginName, "dsh-memory-win");
-  // tools 刻意不进 inject：工具注册表缺席时插件仍应能注入地图。
-  assert.deepEqual(inject, ["systemPrompt"]);
+  assert.deepEqual(inject, ["systemPrompt", "tools"]);
+  // 回归：初版写的是 inject:["systemPrompt"] + ctx.get("tools")。ctx.get 在服务未就绪时
+  // 返回 undefined，于是四个工具**一个都没注册上且无任何报错** —— 真实宿主里就是这样
+  // 静默丢了全部工具（提示词注入却一直正常，极具迷惑性）。
+  // 必须靠 inject 让 Cordis 等 tools 就绪，而不是靠 ctx.get 碰运气。
+  assert.equal(inject.includes("tools"), true, "tools 必须是硬依赖");
 });
 
 test("apply 注册一个提示词段，name 与 SECTION_NAME 一致", () => {
@@ -461,12 +467,11 @@ test("waterfall 路径同样覆盖项目层，且在守卫异常时无副作用�
   assert.equal(nextCalled, 2);
 });
 
-test("宿主完全没有 tools 服务时，只注册注入段而不报错", () => {
-  const { ctx, record } = fakeCtx({ withTools: false });
-  apply(ctx);
-  assert.equal(record.sections.length, 1);
-  assert.equal(record.tools.length, 0);
-  assert.equal(record.guards.length, 0);
-  // 仍然要产出可用的段文本
-  assert.match(record.sections[0].text({}), /长期记忆/);
+test("宿主没有 tools 服务时**显式失败**，而不是静默少掉全部工具", () => {
+  // 行为刻意与初版相反。初版是"没有 tools 就只注册注入段、不报错" ——
+  // 那正是真实宿主里丢掉全部工具的原因：失败不可见。
+  // 既然 tools 已是 inject 硬依赖，走到这里就说明声明与实际不符，
+  // 应该让插件加载失败（可见）而不是装作没事。
+  const { ctx } = fakeCtx({ withTools: false });
+  assert.throws(() => apply(ctx), /tools 服务不可用/);
 });
