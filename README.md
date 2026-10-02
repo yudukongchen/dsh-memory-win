@@ -194,11 +194,45 @@ node test/run.mjs
 dsh plugin --profile desktop add "file:E:/Game/github/dsh-memory-win"
 ```
 
+### ⚠️ `file:` 依赖是**拷贝快照**，不是符号链接
+
+这是本项目踩过的最贵的一个坑，务必先读。
+
+本机 profile 配置为 `nodeLinker: hoisted`，且 `file:` 目录依赖被 pnpm 解析为
+`{directory, type: directory}`。实测结论：
+
+| 事实 | 证据 |
+|---|---|
+| profile 里的 `node_modules/dsh-memory-win` 是**真实目录拷贝** | `LinkType`/`Target` 皆空，非 symlink/junction |
+| **改了仓库源码，宿主不会看到** | 逐文件哈希比对：profile 副本停在安装时刻，七个文件全部与源码不同 |
+| `install_bundle` **不会**刷新它 | 依赖 spec（目录路径）未变 ⇒ pnpm 判定已满足 ⇒ `changed:false`，文件不重拷 |
+
+⇒ **每次改动源码后，必须先把文件同步进 profile，再重启，改动才会生效。**
+
+```powershell
+# 源码改动后的同步（PowerShell；$dst 指向 profile 里的包目录）
+$src = "E:\Game\github\dsh-memory-win"
+$dst = "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\dsh-memory-win"
+Copy-Item "$src\index.js","$src\package.json","$src\cordis.patch.yml" $dst -Force
+Remove-Item "$dst\lib" -Recurse -Force -ErrorAction SilentlyContinue
+Copy-Item "$src\lib" "$dst\lib" -Recurse -Force
+# 然后逐文件 Get-FileHash 比对，确认一致，再重启桌面版
+```
+
+**为什么这是最贵的坑**：它会让"改了却看不到效果"看起来像代码缺陷。
+本项目连续两轮误判为插件 bug（守卫不生效、工具丢失），实际都是宿主在跑陈旧拷贝。
+排查时的决定性手段是**直接对 profile 里那份文件取哈希**，而不是反复重装或重启。
+
+> **更稳的分发方式**：打包成 `.tgz` 再装（像 `dsh-our-free-model` 那样）。
+> tarball 依赖有 integrity 哈希，改内容必然换 spec，PNPM 不会把它当成"已满足"跳过刷新。
+> 这是 P4 待办项的现实理由。
+
 ### ⚠️ `plugin add` 只装依赖，**不会挂载**
 
-这一步只做了两件事：把 `dsh-memory-win` 写进 profile 的 `dependencies`、并创建链接。
-它**不会**把包加进 `dsh.profile.bundles` —— 而 bundle 列表才是真正决定"哪个 patch 层被应用"的东西
-（本插件没有 `cordis.patch.yml` 的自定义路径，它的 patch 由 `dsh.bundle.patch` 声明，靠被列进 bundles 生效）。
+这一步只做了两件事：把 `dsh-memory-win` 写进 profile 的 `dependencies`、并把包复制进
+`node_modules`。它**不会**把包加进 `dsh.profile.bundles` —— 而 bundle 列表才是真正决定
+"哪个 patch 层被应用"的东西（本插件没有 `cordis.patch.yml` 的自定义路径，它的 patch 由
+`dsh.bundle.patch` 声明，靠被列进 bundles 生效）。
 
 所以还必须**再启用一次 bundle**，让包进入 profiles 的 bundles 列表：
 
