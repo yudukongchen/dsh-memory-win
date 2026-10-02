@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory-win",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "Windows-first long-term memory for the DSH desktop app: plain markdown shards with a per-step map injection (path / entry count / latest date / keywords) and on-demand retrieval through the memory_search tool. Zero shell, zero external process, zero dependency — roots resolve at call time from DSH_HOME/homedir so the global layer cannot silently vanish on Windows, and memory is split into a global layer plus a per-project layer (inside the repo) plus named shards under each.",
@@ -33,7 +33,8 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node test/run.mjs"
+    "test": "node test/run.mjs",
+    "pack:plugin": "node scripts/pack.mjs"
   },
   "license": "MIT"
 }

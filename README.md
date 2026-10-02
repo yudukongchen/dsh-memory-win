@@ -190,46 +190,57 @@ $ node test/run.mjs
 cd dsh-memory-win
 node test/run.mjs
 
-# 2) 装进桌面版 profile（会改动 ~/.dsh/profiles/desktop，建议先备份）
-dsh plugin --profile desktop add "file:E:/Game/github/dsh-memory-win"
+# 2) 打包成 tarball，并自动复制到 ~/.dsh/plugin-tarballs/
+node scripts/pack.mjs
+
+# 3) 装进桌面版 profile（会改动 ~/.dsh/profiles/desktop，建议先备份）
+dsh plugin --profile desktop add "file:C:/Users/<你>/.dsh/plugin-tarballs/dsh-memory-win-0.1.0.tgz"
 ```
 
-### ⚠️ `file:` 依赖是**拷贝快照**，不是符号链接
+### ⚠️ 为什么必须用 tarball，而不是 `file:` 目录
 
-这是本项目踩过的最贵的一个坑，务必先读。
+**这是本项目踩过的最贵的一个坑，务必先读。**
 
-本机 profile 配置为 `nodeLinker: hoisted`，且 `file:` 目录依赖被 pnpm 解析为
-`{directory, type: directory}`。实测结论：
+profile 配置为 `nodeLinker: hoisted`，`file:` **目录**依赖会被 pnpm 解析成
+`{directory, type: directory}` 并做**拷贝快照**（**不是**符号链接）。实测：
 
 | 事实 | 证据 |
 |---|---|
 | profile 里的 `node_modules/dsh-memory-win` 是**真实目录拷贝** | `LinkType`/`Target` 皆空，非 symlink/junction |
-| **改了仓库源码，宿主不会看到** | 逐文件哈希比对：profile 副本停在安装时刻，七个文件全部与源码不同 |
-| `install_bundle` **不会**刷新它 | 依赖 spec（目录路径）未变 ⇒ pnpm 判定已满足 ⇒ `changed:false`，文件不重拷 |
+| **改了仓库源码，宿主不会看到** | 逐文件哈希比对：副本停在安装时刻，七个源文件全部与源码不同 |
+| `install_bundle` **不会**刷新它 | 目录 spec 未变 ⇒ pnpm 判定"已满足" ⇒ `changed:false`，不重拷文件 |
 
-⇒ **每次改动源码后，必须先把文件同步进 profile，再重启，改动才会生效。**
+**后果**：它让"改了却看不到效果"**伪装成代码缺陷**。本项目连续两轮把"部署未同步"
+误判为插件 bug（先是守卫不生效、后是工具丢失），直到对 profile 里那份文件取哈希才定性。
+
+**tarball 解决它 —— 但前提是 _文件名必须变_。** tarball 依赖带 integrity 哈希，然而实测发现：
+
+| 操作 | 结果 |
+|---|---|
+| 替换**同文件名**的 tarball（内容变了）后重新 `add` | pnpm 报 `downloaded 1`，但 **`node_modules` 里的文件没被改写** —— 因为 spec（路径）未变，照旧跳过 |
+| **升版本号** → 新文件名 → 重新 `add` | `added 1`，10 个文件**逐字节一致** ✅ |
+
+⇒ **每次改动源码后必须升 `package.json` 的 `version`**，再走下面的流程。否则坑只是从
+"目录依赖"换到了"tarball 依赖"，一样会跑到旧代码。
 
 ```powershell
-# 源码改动后的同步（PowerShell；$dst 指向 profile 里的包目录）
-$src = "E:\Game\github\dsh-memory-win"
-$dst = "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\dsh-memory-win"
-Copy-Item "$src\index.js","$src\package.json","$src\cordis.patch.yml" $dst -Force
-Remove-Item "$dst\lib" -Recurse -Force -ErrorAction SilentlyContinue
-Copy-Item "$src\lib" "$dst\lib" -Recurse -Force
-# 然后逐文件 Get-FileHash 比对，确认一致，再重启桌面版
+# 每次改动源码后的固定流程
+# 1) 升版本号（必须！否则下面的 add 会静默跳过）
+#    编辑 package.json 的 "version": "0.1.1" -> "0.1.2"
+# 2) 打包并复制到 ~/.dsh/plugin-tarballs/
+node scripts/pack.mjs
+# 3) 装新版本（路径变了，pnpm 才会真正重装）
+dsh plugin --profile desktop add "file:C:/Users/<你>/.dsh/plugin-tarballs/dsh-memory-win-0.1.2.tgz"
+# 4) 重启桌面版
 ```
 
-**为什么这是最贵的坑**：它会让"改了却看不到效果"看起来像代码缺陷。
-本项目连续两轮误判为插件 bug（守卫不生效、工具丢失），实际都是宿主在跑陈旧拷贝。
-排查时的决定性手段是**直接对 profile 里那份文件取哈希**，而不是反复重装或重启。
-
-> **更稳的分发方式**：打包成 `.tgz` 再装（像 `dsh-our-free-model` 那样）。
-> tarball 依赖有 integrity 哈希，改内容必然换 spec，PNPM 不会把它当成"已满足"跳过刷新。
-> 这是 P4 待办项的现实理由。
+> **排查同类问题的手段**：怀疑"改了没生效"时，**直接对 profile 里那份文件取哈希**
+> 与源码比对，而不是反复重装或重启。这一步能立刻区分"代码不对"与"没跑到新代码"。
+> 本项目为此付出了连续两轮误判的代价，才有这一条。
 
 ### ⚠️ `plugin add` 只装依赖，**不会挂载**
 
-这一步只做了两件事：把 `dsh-memory-win` 写进 profile 的 `dependencies`、并把包复制进
+这一步做了两件事：把 `dsh-memory-win` 写进 profile 的 `dependencies`、并把 tarball 解压进
 `node_modules`。它**不会**把包加进 `dsh.profile.bundles` —— 而 bundle 列表才是真正决定
 "哪个 patch 层被应用"的东西（本插件没有 `cordis.patch.yml` 的自定义路径，它的 patch 由
 `dsh.bundle.patch` 声明，靠被列进 bundles 生效）。
@@ -241,6 +252,12 @@ plugin_manager { action: "install_bundle", target: "dsh-memory-win" }
 ```
 
 返回 `{"stage":"enable","changed":true,"application":"restart-required"}` 即成功。
+成功后可核对 `list_bundles`：本插件应显示 `installed: true, removable: true` 并带 `rows`
+（与 `dsh-our-free-model` 同构）—— 这正是「设置 → 插件」里那个开关可用的条件。
+
+> **实测小坑**：`dsh plugin add` 的进程有时会挂住不退出（依赖与 lockfile 都已写好、
+> 无子进程残留）。不要一直等；确认输出后 `job_kill` 即可。另有一次在最后写
+> `package.json` 时报 `EPERM rename`（文件被占用），**重跑一次 add 即成功**。
 
 ### 关于那个开关
 

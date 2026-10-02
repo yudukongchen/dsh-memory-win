@@ -4,5 +4,10 @@ node_modules/
 .agent-memory/
 .dsh-memory/
 
+# 打包产物与 npm 临时缓存（由 scripts/pack.mjs 生成）
+dist/
+.npm-cache/
+*.tgz
+
 *.tmp-*
 *.log
