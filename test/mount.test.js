@@ -367,7 +367,7 @@ test("两条守卫路径**同时**挂载（不是二选一）", () => {
   const { ctx, record } = fakeCtx();
   apply(ctx);
   // 回归：早期实现是 if (tools.guard) 用 guard; else 用 pre-execute —— 二选一，
-  // 导致 DSH 有 guard 时项目层分支从不执行、<repo>/agent-memory 的直写不被拦。
+  // 导致 DSH 有 guard 时项目层分支从不执行、<repo>/.agent-memory 的直写不被拦。
   // 该绕过硬真实宿主实测确认后改成两条都挂。
   assert.equal(record.guards.length, 1, "应注册单调守卫");
   assert.equal(record.listeners.length, 1, "同时应挂 pre-execute waterfall");

@@ -31,7 +31,7 @@ DSH 桌面版（Windows 优先）的长期记忆插件 —— **纯本地、零�
 
 ```
 ~/.dsh/memory-win/global/*.md           ← 全局层（跨项目通用）
-<repo>/agent-memory/*.md                ← 项目层（随仓库走，默认被 .gitignore 忽略）
+<repo>/.agent-memory/*.md                ← 项目层（随仓库走，默认被 .gitignore 忽略）
 ```
 
 每个 `*.md` 是一个**主题分片**，首行可选关键词头，正文是条目：
@@ -47,7 +47,7 @@ DSH 桌面版（Windows 优先）的长期记忆插件 —— **纯本地、零�
 
 条目格式是唯一硬约定：`- [YYYY-MM-DD] 事实`。日期经 **UTC 回读校验**（`new Date("2026-13-45")` 会进位到 2027-02-14 而不是 Invalid Date，只判 `NaN` 会把这类错误放行）。
 
-> **项目层目录名是 `agent-memory`，不带产品前缀。** 目录里放的只是明文 markdown，任何 agent（Claude Code、Codex、Cursor 等）都能直接读，不需要认识 DSH。这是刻意的命名选择。
+> **项目层目录名是 `.agent-memory`。** 去掉产品前缀是因为目录里放的只是明文 markdown，任何 agent（Claude Code、Codex、Cursor 等）都能直接读，不需要认识 DSH。保留前导点、作为隐藏目录，是仓库里"工具产生的数据目录"的通行惯例（`.git` / `.vscode` / `.claude`）—— **隐藏不等于不可读**，别的 agent 用绝对路径或 `ls -a` 一样能读。
 
 ### 记忆可以被**修正**（不只是追加）
 
@@ -113,7 +113,7 @@ DSH 桌面版（Windows 优先）的长期记忆插件 —— **纯本地、零�
 
 1. **守卫只覆盖原生 `write`/`edit`。** `pwsh`、MCP 工具、其它插件都能绕过。**它是防手滑，不是防对抗。**
 2. **两条守卫路径同时挂载，取并集。** `tools.guard()`（单调，不可被后续监听者放行）与 `tools/pre-execute` waterfall **都注册**，二者共用同一判定 `directWriteDenial()`，因此覆盖面一致（全局层 + 项目层）。
-   > 此处曾是一个**真实缺陷**：早期实现写成二选一（`if (tools.guard) {...} else {...}`），由于 DSH 有 `tools.guard`，项目层那条分支**从不执行**，`<repo>/agent-memory/*.md` 的直写**完全不被拦** —— 已在真实宿主里实测到（写入竟然成功落盘）并修复。教训：**单调性更强 ≠ 覆盖面更广**。
+   > 此处曾是一个**真实缺陷**：早期实现写成二选一（`if (tools.guard) {...} else {...}`），由于 DSH 有 `tools.guard`，项目层那条分支**从不执行**，`<repo>/.agent-memory/*.md` 的直写**完全不被拦** —— 已在真实宿主里实测到（写入竟然成功落盘）并修复。教训：**单调性更强 ≠ 覆盖面更广**。
    >
    > 另一处曾判断错误：我以为同步 guard "拿不到 cwd"，实际宿主在 `exec` 上就带着 `agent`（`guardReason(exec)` 里显式读它），所以同步 guard 同样能解析项目层。
 3. **跨进程并发写不做锁。** 串行化是**进程内**的（DSH 插件跑在宿主进程内，这在桌面版是成立的）。锁文件方案被刻意放弃 —— `dsh-memory-evolve` 的 pid 存活探测锁在 Windows 上语义不可靠。
@@ -161,7 +161,7 @@ $ node test/run.mjs
 | 检索行号准确性 | `memory_search` 返回 `line=3` / `line=4`；实读文件确认条目**正好**在第 3、4 行（第 1 行关键词头，第 2 行空行） |
 | 中文检索 | 两词 AND 命中 2 条；长中文事实的子串匹配正常，无需分词 |
 | **写入守卫（主路径）** | 对记忆文件直接调用原生 `write` → **被 `tools.guard()` 拒绝**，返回完整可执行理由。这证明**主路径**（单调守卫）真的挂上了，而不是只有回落路径 |
-| 分层 | `memory_list` 同时报出全局层（2 条）与项目层（0 条，路径已相对化为 `agent-memory`） |
+| 分层 | `memory_list` 同时报出全局层（2 条）与项目层（0 条，路径已相对化为 `.agent-memory`） |
 
 其中「守卫主路径生效」与「行号与文件真实行一致」是最关键的两条：前者证明安全机制不是纸面设计；
 后者证明"检索 → 按行号 `read` 取原文"这条核心工作流真的成立，而不是只在单测的假文件上成立。
@@ -224,22 +224,22 @@ plugin_manager { action: "install_bundle", target: "dsh-memory-win" }
 | 层 | 路径 |
 |---|---|
 | 全局 | `%DSH_HOME%`（默认 `C:\Users\<你>\.dsh`）`\memory-win\global\*.md` |
-| 项目 | `<会话工作目录>\agent-memory\*.md` |
+| 项目 | `<会话工作目录>\.agent-memory\*.md` |
 
-项目层放在仓库内、且默认被 `.gitignore` 忽略（`dsh-memory-win/.gitignore` 只覆盖自身仓库；**使用者的仓库需自行忽略 `agent-memory/`**）。
+项目层放在仓库内、且默认被 `.gitignore` 忽略（`dsh-memory-win/.gitignore` 只覆盖自身仓库；**使用者的仓库需自行忽略 `.agent-memory/`**）。
 
 ### ⚠️ 从 `.dsh-memory` 升级（破坏性改名）
 
-项目层目录已从 `.dsh-memory/` 改名为 **`agent-memory/`**（去掉产品前缀，便于其它 agent 读取）。
+项目层目录已从 `.dsh-memory/` 改名为 **`.agent-memory/`**（去掉产品前缀，便于其它 agent 读取；保留前导点作为隐藏目录）。
 **旧目录不会被自动迁移** —— 插件只读新目录，所以不迁移就等于项目层记忆"消失"了。
 
 文件格式完全一致，手工搬一次即可：
 
 ```powershell
 # 在目标仓库根目录执行；合并同名分片请自行确认无冲突
-Rename-Item .dsh-memory agent-memory
+Rename-Item .dsh-memory .agent-memory
 # 若新旧目录都已有内容，改为逐个搬文件：
-# Get-ChildItem .dsh-memory\*.md | Move-Item -Destination agent-memory\
+# Get-ChildItem .dsh-memory\*.md | Move-Item -Destination .agent-memory\
 ```
 
 搬完后建议跑一次 `memory_list` 确认条数符合预期。

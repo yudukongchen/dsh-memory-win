@@ -53,12 +53,15 @@ test("globalRoot 是绝对路径且位于 DSH_HOME 下", () => {
   assert.equal(root.startsWith(resolve("E:\\fake-dsh")), true);
 });
 
-test("projectRoot 落在仓库内的 agent-memory，cwd 缺失时失败关闭", () => {
+test("projectRoot 落在仓库内的 .agent-memory，cwd 缺失时失败关闭", () => {
   const root = projectRoot("E:\\Game\\repo");
   assert.equal(root, join(resolve("E:\\Game\\repo"), PROJECT_DIR_NAME));
-  // 目录名刻意不带产品前缀，方便其它 agent 直接读取（需求补充 1）
-  assert.equal(PROJECT_DIR_NAME, "agent-memory");
-  assert.equal(PROJECT_DIR_NAME.startsWith("."), false, "不应是隐藏目录");
+  // 去掉产品前缀（便于其它 agent 读取），但保留前导点作为隐藏目录 ——
+  // 这是仓库里"工具产生的数据目录"的通行惯例（.git / .vscode / .claude）。
+  // 隐藏不等于不可读：别的 agent 用绝对路径或 ls -a 一样能读。
+  assert.equal(PROJECT_DIR_NAME, ".agent-memory");
+  assert.equal(PROJECT_DIR_NAME.startsWith("."), true, "应为隐藏目录");
+  assert.equal(/dsh/i.test(PROJECT_DIR_NAME), false, "不应带产品前缀");
 
   // 失败关闭而不是"回落到全局层"——静默回落正是失效的来源。
   assert.equal(projectRoot(undefined), undefined);
@@ -85,7 +88,7 @@ test("slugOf 不产生路径分隔符", () => {
 
 test("displayPath 把项目内路径转为相对，项目外保持绝对", () => {
   const cwd = "E:\\Game\\repo";
-  assert.equal(displayPath("E:\\Game\\repo\\agent-memory\\default.md", cwd), "agent-memory/default.md");
+  assert.equal(displayPath("E:\\Game\\repo\\.agent-memory\\default.md", cwd), ".agent-memory/default.md");
   assert.equal(displayPath("E:\\Game\\repo", cwd), ".");
   // 记忆目录在仓库外（全局层）时保持绝对，方便模型直接拿去 read
   const outside = "C:\\Users\\me\\.dsh\\memory-win\\global\\a.md";
@@ -94,7 +97,7 @@ test("displayPath 把项目内路径转为相对，项目外保持绝对", () =>
 });
 
 test("shardPath 允许正常名称", () => {
-  const dir = resolve("E:\\Game\\repo\\agent-memory");
+  const dir = resolve("E:\\Game\\repo\\.agent-memory");
   assert.equal(shardPath(dir, "default"), join(dir, "default.md"));
   assert.equal(shardPath(dir, "windows-paths"), join(dir, "windows-paths.md"));
   assert.equal(shardPath(dir, "构建 坑"), join(dir, "构建 坑.md"));
@@ -102,7 +105,7 @@ test("shardPath 允许正常名称", () => {
 });
 
 test("shardPath 拒绝路径逃逸与非法名", () => {
-  const dir = resolve("E:\\Game\\repo\\agent-memory");
+  const dir = resolve("E:\\Game\\repo\\.agent-memory");
   for (const bad of ["..", ".", "../evil", "a/b", "a\\b", "", "   "]) {
     assert.throws(() => shardPath(dir, bad), undefined, `应拒绝 shard 名 ${JSON.stringify(bad)}`);
   }
