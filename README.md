@@ -86,9 +86,9 @@ DSH 桌面版（Windows 优先）的长期记忆插件 —— **纯本地、零�
 2. **两条守卫路径覆盖面不同**：`tools.guard()`（单调、不可被后续监听者放行）回调只拿到 `execution`、没有可靠的 cwd，因此**只拦全局层**；项目层由 `tools/pre-execute` waterfall 覆盖。两者一起挂，取并集。
 3. **跨进程并发写不做锁。** 串行化是**进程内**的（DSH 插件跑在宿主进程内，这在桌面版是成立的）。锁文件方案被刻意放弃 —— `dsh-memory-evolve` 的 pid 存活探测锁在 Windows 上语义不可靠。
 4. **不做 shell 解析。** 不解析 `pwsh` 的重定向目标去判断"是否在改记忆"。这类启发式在 Windows 上收益低且正是误报来源。
-5. **无浏览器半身 / 无设置面板。** 开关与 UI 后续再补。
+5. **无浏览器半身 / 无设置面板。** 启停用 DSH 原生的插件开关（见第 5 节），不需要插件自己做 UI；但**没有自己的设置页**，所以注入档位、内联阈值这些目前是常量而非可配置项。
 6. **不做向量检索、不做后台巩固、不调用模型。** 这是刻意的取舍，不是未完成。
-7. **未在真实 DSH 宿主内做端到端验证**（见下节）。
+7. **端到端已在真实宿主内验证通过**（见第 4 节），但仍有一条未实测：设置里那个开关的实际点击（`install_bundle` 返回 `restart-required`，需重启后 UI 才重新拉取列表）。
 
 ---
 
@@ -113,16 +113,41 @@ $ node test/run.mjs
 
 其中「挂载」层断言的三条宿主契约（`systemPrompt.section` 的 `text` 可传函数、`tools.register` 收**原始 JSON Schema** 且 `execute` 返回普通 JSON 值由 `output.render` 转换、`tools.guard` 返回拒绝原因字符串）是**实读 DSH 运行时 bundle 得到的**，不是照 TypeScript 声明推测的。
 
-### 未验证（明确声明）
+### 宿主内端到端验证（已补做）
 
-- **未在真实 DSH 宿主内挂载运行。** 本机 `node v18.16.0`、DSH desktop profile 未做改动。上述挂载测试用的是**假 ctx**，它验证的是"接线形状符合契约"，**不等于宿主内实际生效**。
-- 未验证真实会话里的注入时序与 KV cache 实际命中率。
+插件已装入本机 desktop profile（`install_bundle` 返回 `application: restart-required`），
+并在**当前会话内即时生效** —— 未重启进程即可观察到：本轮系统提示词里已带上地图段，
+且 `memory_add` / `memory_list` / `memory_search` 出现在工具清单中。
+
+实测结果：
+
+| 验证项 | 结果 |
+|---|---|
+| 全局层根目录解析 | `C:\Users\king\.dsh\memory-win\global` —— 本机 **`HOME` 未设**，仍解析正确（证明"调用时求值 + `homedir()` 兜底"两条都生效） |
+| 地图即时性 | `memory_add` 之后**同一轮**提示词里的地图就从"0 片 / 0 条"变为"1 片 / 2 条"，且由地图档切到小层内联档 |
+| 写入 | `memory_add` 落盘 `dsh-plugin-dev.md`：首行关键词头 + 空行 + 条目 |
+| 检索行号准确性 | `memory_search` 返回 `line=3` / `line=4`；实读文件确认条目**正好**在第 3、4 行（第 1 行关键词头，第 2 行空行） |
+| 中文检索 | 两词 AND 命中 2 条；长中文事实的子串匹配正常，无需分词 |
+| **写入守卫（主路径）** | 对记忆文件直接调用原生 `write` → **被 `tools.guard()` 拒绝**，返回完整可执行理由。这证明**主路径**（单调守卫）真的挂上了，而不是只有回落路径 |
+| 分层 | `memory_list` 同时报出全局层（2 条）与项目层（0 条，路径已相对化为 `.dsh-memory`） |
+
+其中「守卫主路径生效」与「行号与文件真实行一致」是最关键的两条：前者证明安全机制不是纸面设计；
+后者证明"检索 → 按行号 `read` 取原文"这条核心工作流真的成立，而不是只在单测的假文件上成立。
+
+### 仍未验证（明确声明）
+
+- 未验证真实会话里的 KV cache 实际命中率（本机无法测量）。
 - 未验证多会话并发（当前只有单进程内的并发回归测试）。
+- **`memory_edit` / 删除路径尚未实现**，故无从验证。
+- 「设置 → 插件」里那个开关的**实际点击**未验证：`install_bundle` 返回的是
+  `restart-required`，UI 侧需重启后才会重新拉取 bundle 列表。开关绑定的是 DSH 原生
+  `disabled` 机制（已从 bundle 源码核实），但"点一下确实关掉"这一步未实测。
 
-### 环境事实（踩到的两个坑，值得记录）
+### 环境事实（踩到的三个坑，值得记录）
 
 1. **`node --test test/` 在受限沙箱下会 `spawn EPERM`。** 它把每个文件 fork 成子进程并用管道收 stdio，而沙箱禁止子进程管道通信 —— 表现是**四个测试文件全报 `spawn EPERM`、一条断言都跑不到**，看起来像测试失败，实际是运行器跑不起来。因此改用 `test/run.mjs` 在**同进程内**依次 import，断言与结果完全一致。
 2. **沙箱临时目录会被重映射**（`$env:TEMP` 实际解析到 `...\Temp\dsh-<random>\...`）。测试因此全部使用 `mkdtempSync`，不依赖固定路径。
+3. **沙箱禁止写 `~/.dsh`**（工作区之外）。因此 `dsh plugin add` 与 `plugin_manager install_bundle` 都必须在放宽权限后才能执行；普通桌面版用户没有这个限制。
 
 ---
 
@@ -133,22 +158,34 @@ $ node test/run.mjs
 cd dsh-memory-win
 node test/run.mjs
 
-# 2) 装进桌面版 profile（需要时再执行；会改动 ~/.dsh/profiles/desktop）
-dsh plugin --profile desktop add "file:E:\Game\github\dsh-memory-win"
+# 2) 装进桌面版 profile（会改动 ~/.dsh/profiles/desktop，建议先备份）
+dsh plugin --profile desktop add "file:E:/Game/github/dsh-memory-win"
 ```
 
-或手工在 `~/.dsh/profiles/desktop/cordis.patch.yml` 追加：
+### ⚠️ `plugin add` 只装依赖，**不会挂载**
 
-```yaml
-- insert:
-    - id: dsh-memory-win
-      name: 'dsh-memory-win'
-      config: {}
+这一步只做了两件事：把 `dsh-memory-win` 写进 profile 的 `dependencies`、并创建链接。
+它**不会**把包加进 `dsh.profile.bundles` —— 而 bundle 列表才是真正决定"哪个 patch 层被应用"的东西
+（本插件没有 `cordis.patch.yml` 的自定义路径，它的 patch 由 `dsh.bundle.patch` 声明，靠被列进 bundles 生效）。
+
+所以还必须**再启用一次 bundle**，让包进入 profiles 的 bundles 列表：
+
+```
+plugin_manager { action: "install_bundle", target: "dsh-memory-win" }
 ```
 
-然后把包放进 `~/.dsh/profiles/desktop/node_modules/`，重启桌面版。
+返回 `{"stage":"enable","changed":true,"application":"restart-required"}` 即成功。
 
-**桌面版是启动型 profile，改动后必须重启才生效。**
+### 关于那个开关
+
+启用后，「设置 → 插件」里会出现 **dsh-memory-win** 一行，带一个与 `Our Free Model` 完全同构的开关。
+这是 **DSH 原生的插件启停**，不是插件自己做的：它绑定 loader 条目的 `disabled` 选项
+（`pluginManager.setBundleEnabled` / `setPluginEnabled`，返回 `applied | restart-required`）。
+**插件侧无需任何代码。**
+
+注意「设置 → 插件」里带 `readOnlyReason` 的内置 bundle 是**锁定的**（开关灰掉）；
+只有 `removable: true` 且有 `rows` 的条目可切换 —— 这也是必须走 `install_bundle`
+而不是手工往 `cordis.patch.yml` 插一条的原因：手工插的行不在 bundle 注册表里，可能拿不到可用开关。
 
 ### 数据位置
 
