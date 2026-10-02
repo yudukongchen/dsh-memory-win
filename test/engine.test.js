@@ -386,15 +386,30 @@ test("correctMemory 找不到 id 时给出可执行提示，且不改动文件",
   assert.equal(readFileSync(join(globalRoot(), "t.md"), "utf8"), before, "失败时不得改动文件");
 });
 
-test("correctMemory 拒绝取代当天条目（时间线不能倒挂）", async () => {
-  // 今天写入的条目不能被"更晚的结论"取代 —— 否则修正条目日期会早于被取代者。
-  await appendMemory({ target: "global", shard: "today", fact: "今天刚写的" });
+test("correctMemory 允许**同日**取代（当天刚写错的记忆必须能改）", async () => {
+  // 这条规则修正过一次：初版要求"严格更晚"，导致当天写错的记忆无法修正 ——
+  // 而"刚记下就发现错了"恰恰是最常见的情形。现在只要**不早于**被取代者即可。
+  await appendMemory({ target: "global", shard: "today", fact: "今天刚写的，写错了" });
+  const id = listLayer("global", projectCwd).shards[0].entries[0].id;
+
+  const r = await correctMemory({ target: "global", shard: "today", id, reason: "correction", replacement: "当天就改对了" });
+  assert.equal(r.ok, true);
+  assert.equal(r.superseded.date, r.newEntry.match(/\[(\d{4}-\d{2}-\d{2})\]/)[1], "同日取代：新旧条目同一天");
+  assert.equal(listLayer("global", projectCwd).total, 1, "旧条目已失效");
+  assert.equal(searchMemory("写错了", { cwd: projectCwd }).hits.length, 0);
+});
+
+test("correctMemory 拒绝**回填**：替换日期早于被取代者", async () => {
+  await appendMemory({ target: "global", shard: "back", fact: "较新的结论", date: "2026-06-01" });
   const id = listLayer("global", projectCwd).shards[0].entries[0].id;
 
   await assert.rejects(
-    () => correctMemory({ target: "global", shard: "today", id, reason: "defect", replacement: "改" }),
-    /不早于今天/,
+    () => correctMemory({ target: "global", shard: "back", id, reason: "defect", replacement: "回填的旧结论", date: "2026-01-01" }),
+    /不能早于被取代的结论/,
   );
+  // 边界：同日（等于被取代者）应放行
+  const ok = await correctMemory({ target: "global", shard: "back", id, reason: "defect", replacement: "同日修正", date: "2026-06-01" });
+  assert.equal(ok.ok, true);
 });
 
 test("修正后的新条目自身可以被再次修正", async () => {
