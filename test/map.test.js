@@ -42,6 +42,17 @@ test("空记忆也注入纪律块与写入指引", () => {
   assert.match(text, /memory_search/, "取回方式必须始终在场");
 });
 
+test("纪律块写明「长内容 → 文档 + 指针」（一行结论指向长文档）", () => {
+  const text = renderMap({ cwd: projectCwd });
+  // 不给这条纪律，模型会把复盘/时间线硬塞进单行记忆（塞不下就被拒），
+  // 或者干脆不记 —— 两者都让"过程"永久丢失。
+  assert.match(text, /\*\*长内容\*\*/, "长内容纪律必须在注入里");
+  assert.match(text, /一行指针/, "必须明确记忆里只留一行指针");
+  assert.match(text, /docs\/postmortem/, "必须说清文档该放哪（仓库普通文档）");
+  assert.match(text, /写它不受记忆守卫限制/, "要说明写文档不会被守卫拦，否则模型不敢写");
+  assert.match(text, /不该记\*\*：过程叙述（见上「长内容」）/, "该记/不该记那条要与长内容纪律互相指向");
+});
+
 test("小层逐条内联，并标注档位", async () => {
   await appendMemory({ target: "global", shard: "s", fact: "唯一的一条" });
   const text = renderMap({ cwd: projectCwd });
