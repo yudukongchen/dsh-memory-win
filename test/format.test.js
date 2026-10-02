@@ -8,15 +8,20 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  entryId,
   findSameFactOtherDate,
+  isBeforeToday,
   isTailDuplicate,
   latestDate,
+  markSuperseded,
   neutralizePromptVars,
   parseEntries,
   parseHeader,
   renderEntry,
   scanSecrets,
+  splitFixMeta,
   today,
+  uniqueIdIn,
   validateFactBody,
   validEntryDate,
 } from "../lib/format.js";
@@ -134,4 +139,91 @@ test("validateFactBody 拒绝空、多行、自带前缀与超长", () => {
 
 test("renderEntry 产出规范条目", () => {
   assert.equal(renderEntry("2026-10-05", "  事实  "), "- [2026-10-05] 事实");
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 取代机制：条目 id、fix 元数据、注释标记
+// ══════════════════════════════════════════════════════════════════════════════
+
+test("entryId 由内容决定：稳定、区分日期与正文", () => {
+  const a = entryId("2026-01-01", "同一条事实");
+  assert.equal(entryId("2026-01-01", "同一条事实"), a, "相同输入必须得到相同 id");
+  assert.notEqual(entryId("2026-01-02", "同一条事实"), a, "日期不同 → id 不同");
+  assert.notEqual(entryId("2026-01-01", "另一条事实"), a, "正文不同 → id 不同");
+  assert.match(a, /^[0-9a-f]{4}$/, "id 应为 4 位十六进制");
+  // id 不应依赖行号或文件名，否则插入行就会让已发出的 id 失效
+  assert.equal(entryId("2026-01-01", "  同一条事实  "), a, "首尾空白不影响");
+});
+
+test("uniqueIdIn 在同文件冲突时加后缀，保证可定位", () => {
+  const taken = new Set(["abcd"]);
+  assert.equal(uniqueIdIn("abcd", taken), "abcd-2");
+  taken.add("abcd-2");
+  assert.equal(uniqueIdIn("abcd", taken), "abcd-3");
+  assert.equal(uniqueIdIn("beef", taken), "beef", "不冲突时原样返回");
+});
+
+test("splitFixMeta 拆出 fix 元数据，且只认行尾", () => {
+  assert.deepEqual(splitFixMeta("新结论 [fix:defect of #a3f1]"), {
+    text: "新结论",
+    fix: { reason: "defect", of: "a3f1" },
+  });
+  // 四类 reason 都要认
+  for (const reason of ["defect", "overturned", "correction", "retract"]) {
+    const r = splitFixMeta(`结论 [fix:${reason} of #abcd]`);
+    assert.equal(r.fix.reason, reason);
+  }
+  // 不在行尾 / 非法 reason / 非法 id → 视为普通正文，避免误伤
+  assert.equal(splitFixMeta("新结论 [fix:defect of #a3f1] 后面还有话").fix, undefined);
+  assert.equal(splitFixMeta("结论 [fix:瞎写 of #a3f1]").fix, undefined);
+  assert.equal(splitFixMeta("结论 [fix:defect of #zzzz]").fix, undefined);
+  assert.equal(splitFixMeta("普通正文").fix, undefined);
+});
+
+test("markSuperseded 产出整行注释（含边界空格）", () => {
+  assert.equal(markSuperseded("- [2026-01-01] 旧结论"), "<!-- - [2026-01-01] 旧结论 -->");
+  assert.equal(markSuperseded("  - [2026-01-01] 旧结论  "), "<!-- - [2026-01-01] 旧结论 -->");
+});
+
+test("parseEntries 跳过被取代的条目，并给存活条目附 id", () => {
+  const text = [
+    "<!-- 片名 · 关键词 -->",
+    "",
+    "<!-- - [2026-01-01] 已失效的旧结论 -->",
+    "- [2026-01-02] 有效结论",
+    "- [2026-01-03] 修正后的结论 [fix:defect of #abcd]",
+  ].join("\n");
+  const entries = parseEntries(text);
+
+  assert.equal(entries.length, 2, "被注释的旧条目必须被跳过");
+  assert.equal(entries[0].text, "有效结论");
+  assert.equal(entries[0].line, 4, "行号仍指向文件真实行");
+  assert.match(entries[0].id, /^[0-9a-f]{4}$/);
+  // 修正条目的元数据被拆出，正文保持干净
+  assert.equal(entries[1].text, "修正后的结论");
+  assert.deepEqual(entries[1].fix, { reason: "defect", of: "abcd" });
+});
+
+test("parseEntries 不把分片首行的关键词头当成被取代条目", () => {
+  // SUPERSEDED_RE 只认 `<!-- - [`，所以关键词头必须照常被解析为头部而非跳过整行
+  const entries = parseEntries("<!-- 片名 · 关键词 -->\n\n- [2026-01-01] 一条");
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].text, "一条");
+});
+
+test("validateFactBody 拒绝会破坏取代标记的序列", () => {
+  assert.notEqual(validateFactBody("含 --> 的正文"), undefined, "--> 会提前闭合注释");
+  // 只拒"位于行尾"的 fix 串 —— 因为只有行尾那种会被 splitFixMeta 误拆成元数据。
+  assert.notEqual(validateFactBody("[fix:defect of #abcd]"), undefined, "整条就是保留语法");
+  assert.notEqual(validateFactBody("正文 [fix:defect of #abcd]"), undefined, "行尾的保留语法");
+  // 串在中间不会被误拆，因此放行（避免误伤正常讨论该语法的正文）
+  assert.equal(validateFactBody("自带 [fix:defect of #abcd] 后缀"), undefined);
+  assert.equal(validateFactBody("正常正文 [fix 相关但格式不对]"), undefined);
+});
+
+test("isBeforeToday 只认严格早于今天", () => {
+  assert.equal(isBeforeToday("2020-01-01"), true);
+  assert.equal(isBeforeToday(today()), false, "当天不算早于今天");
+  assert.equal(isBeforeToday("2999-01-01"), false, "未来不算");
+  assert.equal(isBeforeToday("2026-13-45"), false, "非法日期不算");
 });

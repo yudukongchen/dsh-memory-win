@@ -1,4 +1,8 @@
 node_modules/
+
+# 本插件自身开发时的项目层记忆（改名前的 .dsh-memory/ 一并忽略，便于迁移期共存）
+agent-memory/
 .dsh-memory/
+
 *.tmp-*
 *.log

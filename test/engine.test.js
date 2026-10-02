@@ -12,8 +12,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 
-import { appendMemory, listLayer, searchMemory, writeChainSize } from "../lib/engine.js";
-import { globalRoot } from "../lib/paths.js";
+import { appendMemory, correctMemory, listLayer, searchMemory, writeChainSize } from "../lib/engine.js";
+import { PROJECT_DIR_NAME, globalRoot } from "../lib/paths.js";
 
 const savedDshHome = process.env.DSH_HOME;
 let sandbox;
@@ -143,8 +143,8 @@ test("全局层与项目层互相隔离", async () => {
   assert.equal(project.shards[0].entries[0].text, "项目事实");
 
   // 项目层落在**仓库内**，符合设计决策
-  assert.equal(project.dir, join(projectCwd, ".dsh-memory"));
-  assert.equal(project.dirPath, ".dsh-memory", "注入里应是相对路径，不泄漏机器特定信息");
+  assert.equal(project.dir, join(projectCwd, PROJECT_DIR_NAME));
+  assert.equal(project.dirPath, PROJECT_DIR_NAME, "注入里应是相对路径，不泄漏机器特定信息");
 });
 
 test("项目层在 cwd 缺失时失败关闭，不回落到全局层", async () => {
@@ -226,4 +226,196 @@ test("写入链按文件维度复用槽位，而非按写入次数增长", async
 
   await appendMemory({ target: "global", shard: "chain-other", fact: "另一个文件" });
   assert.equal(writeChainSize() - before, 2, "换一个文件才新增槽位");
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// memory_correct：取代语义（需求补充 2 —— 发现缺陷 / 结论被推翻 / 用户纠正）
+// ══════════════════════════════════════════════════════════════════════════════
+
+/** 写一条旧条目并回传它的 id，供修正测试使用。 */
+async function seedOld(fact = "旧的结论", date = "2026-01-01", shard = "t") {
+  await appendMemory({ target: "global", shard, fact, date });
+  const entry = listLayer("global", projectCwd).shards.find((s) => s.name === shard).entries.find((e) => e.text === fact);
+  return entry.id;
+}
+
+test("correctMemory 取代旧条目：新条目带 fix 链接，旧条目变注释", async () => {
+  const id = await seedOld("项目层守卫覆盖全局层就够了");
+  const r = await correctMemory({
+    target: "global",
+    shard: "t",
+    id,
+    reason: "defect",
+    replacement: "项目层必须单独覆盖，守卫两条路径都要挂",
+  });
+
+  assert.equal(r.ok, true);
+  assert.equal(r.reason, "defect");
+  assert.equal(r.superseded.id, id);
+  assert.equal(r.superseded.text, "项目层守卫覆盖全局层就够了");
+  assert.match(r.newEntry, /\[fix:defect of #/);
+
+  const text = readFileSync(join(globalRoot(), "t.md"), "utf8");
+  assert.match(text, /<!-- - \[2026-01-01\] 项目层守卫覆盖全局层就够了 -->/, "旧条目应就地注释");
+  assert.match(text, /\[fix:defect of #/, "新条目应带因果链接");
+});
+
+test("被取代的条目不再进地图、也不再被检索命中", async () => {
+  // 这是取代语义的**核心价值**：仅追加会让旧结论继续误导后续判断。
+  const id = await seedOld("这条结论是错的");
+  assert.equal(searchMemory("结论是错的", { cwd: projectCwd }).hits.length, 1, "取代前可检索到");
+
+  await correctMemory({ target: "global", shard: "t", id, reason: "overturned", replacement: "这条结论已修正" });
+
+  const hits = searchMemory("结论是错的", { cwd: projectCwd });
+  assert.equal(hits.hits.length, 0, "取代后旧条目必须检索不到");
+  assert.equal(searchMemory("已修正", { cwd: projectCwd }).hits.length, 1, "新条目可检索到");
+
+  const layer = listLayer("global", projectCwd);
+  assert.equal(layer.total, 1, "有效条目只剩新的一条");
+  assert.equal(
+    layer.shards[0].entries.some((e) => e.text === "这条结论是错的"),
+    false,
+    "旧条目不得出现在层视图里",
+  );
+});
+
+test("correctMemory 保留历史：被取代的行仍在文件里且行号不变", async () => {
+  const a = await seedOld("第一条", "2026-01-01", "keep");
+  await appendMemory({ target: "global", shard: "keep", fact: "第二条", date: "2026-01-02" });
+  await appendMemory({ target: "global", shard: "keep", fact: "第三条", date: "2026-01-03" });
+
+  const before = readFileSync(join(globalRoot(), "keep.md"), "utf8").split("\n");
+  const thirdLine = before.findIndex((l) => l.includes("第三条")) + 1;
+  assert.equal(thirdLine, 5, "前置：第三条在第 5 行");
+
+  await correctMemory({ target: "global", shard: "keep", id: a, reason: "correction", replacement: "第一条已改" });
+
+  const after = readFileSync(join(globalRoot(), "keep.md"), "utf8").split("\n");
+  // 单行替换 ⇒ 行号不变，其它条目的 read offset 不受影响
+  assert.match(after[2], /^<!-- - \[2026-01-01\] 第一条 -->$/, "第 3 行变成注释行");
+  assert.match(after[4], /第三条/, "第三条仍在第 5 行");
+  // 新条目追加在文件末尾（第 6 行）；第 7 项是收尾换行产生的空串
+  assert.match(after[5], /^\- \[2\d{3}-\d{2}-\d{2}\] 第一条已改 \[fix:correction of #/, "新条目应在第 6 行");
+  assert.deepEqual(after.slice(6), [""], "除末尾空行外不应多出任何行");
+});
+
+test("reason=retract 表示纯撤回：旧条目失效且不产生新条目", async () => {
+  const id = await seedOld("这个环境不再适用了");
+  const r = await correctMemory({ target: "global", shard: "t", id, reason: "retract" });
+
+  assert.equal(r.ok, true);
+  assert.equal(r.retracted, true);
+  assert.equal(r.newEntry, undefined);
+  assert.equal(listLayer("global", projectCwd).total, 0, "撤回后该层没有有效条目");
+  assert.equal(searchMemory("不再适用", { cwd: projectCwd }).hits.length, 0);
+});
+
+test("correctMemory 四类 reason 全部可用", async () => {
+  for (const reason of ["defect", "overturned", "correction"]) {
+    const id = await seedOld(`待修正 ${reason}`, "2026-01-01", "reasons");
+    const r = await correctMemory({ target: "global", shard: "reasons", id, reason, replacement: `已修正 ${reason}` });
+    assert.equal(r.reason, reason, `reason=${reason} 应被接受`);
+  }
+  const id = await seedOld("待撤回", "2026-01-01", "reasons");
+  const r = await correctMemory({ target: "global", shard: "reasons", id, reason: "retract" });
+  assert.equal(r.retracted, true);
+});
+
+test("correctMemory 在不指定 shard 时跨分片查找", async () => {
+  await appendMemory({ target: "global", shard: "alpha", fact: "藏在 alpha 里", date: "2026-01-01" });
+  const id = listLayer("global", projectCwd).shards.find((s) => s.name === "alpha").entries[0].id;
+
+  const r = await correctMemory({ target: "global", id, reason: "defect", replacement: "改好了" });
+  assert.equal(r.shard, "alpha", "应报出它实际所在的分片");
+});
+
+test("correctMemory 校验：id / reason / replacement 的各类非法输入", async () => {
+  await seedOld("基准");
+
+  // 只测**确实非法**的输入。注意不能拿"合法但没写 shard"的调用去测错误路径 ——
+  // 那种调用会真的成功，断言就会因为"没有抛错"而失败（本测试初版就踩了这个坑）。
+  await assert.rejects(() => correctMemory({ target: "global", reason: "defect", replacement: "x" }), /缺少 id/);
+  await assert.rejects(() => correctMemory({ target: "global", id: "  ", reason: "defect", replacement: "x" }), /缺少 id/);
+
+  const id = listLayer("global", projectCwd).shards[0].entries[0].id;
+  await assert.rejects(() => correctMemory({ target: "global", id, reason: "  ", replacement: "x" }), /缺少 reason/);
+  await assert.rejects(() => correctMemory({ target: "global", id, reason: "瞎写", replacement: "x" }), /非法/);
+
+  // 非 retract 必须给新结论
+  await assert.rejects(() => correctMemory({ target: "global", id, reason: "defect" }), /必须给出 replacement/);
+  // retract 不应给新结论
+  await assert.rejects(
+    () => correctMemory({ target: "global", id, reason: "retract", replacement: "多余" }),
+    /不应再给 replacement/,
+  );
+  // 新结论同样要过正文与凭据校验
+  await assert.rejects(
+    () => correctMemory({ target: "global", id, reason: "defect", replacement: "多行\n内容" }),
+    /单行/,
+  );
+  await assert.rejects(
+    () =>
+      correctMemory({
+        target: "global",
+        id,
+        reason: "defect",
+        replacement: "密钥 sk-abcdefghijklmnopqrstuvwxyz123456",
+      }),
+    /疑似凭据/,
+  );
+  // 正文不得包含会提前闭合注释的序列
+  await assert.rejects(
+    () => correctMemory({ target: "global", id, reason: "defect", replacement: "含 --> 的正文" }),
+    /-->/,
+  );
+
+  // 以上全部失败 ⇒ 原条目必须完好无损
+  const layer = listLayer("global", projectCwd);
+  assert.equal(layer.total, 1, "全部校验失败后不得改动文件");
+});
+
+test("correctMemory 找不到 id 时给出可执行提示，且不改动文件", async () => {
+  await seedOld("只此一条");
+  const before = readFileSync(join(globalRoot(), "t.md"), "utf8");
+
+  await assert.rejects(
+    () => correctMemory({ target: "global", shard: "t", id: "ffff", reason: "defect", replacement: "x" }),
+    /找不到 id 为 #ffff 的条目/,
+  );
+  assert.equal(readFileSync(join(globalRoot(), "t.md"), "utf8"), before, "失败时不得改动文件");
+});
+
+test("correctMemory 拒绝取代当天条目（时间线不能倒挂）", async () => {
+  // 今天写入的条目不能被"更晚的结论"取代 —— 否则修正条目日期会早于被取代者。
+  await appendMemory({ target: "global", shard: "today", fact: "今天刚写的" });
+  const id = listLayer("global", projectCwd).shards[0].entries[0].id;
+
+  await assert.rejects(
+    () => correctMemory({ target: "global", shard: "today", id, reason: "defect", replacement: "改" }),
+    /不早于今天/,
+  );
+});
+
+test("修正后的新条目自身可以被再次修正", async () => {
+  const id1 = await seedOld("第一版", "2026-01-01", "chain");
+  const r1 = await correctMemory({ target: "global", shard: "chain", id: id1, reason: "defect", replacement: "第二版", date: "2026-01-02" });
+  const r2 = await correctMemory({ target: "global", shard: "chain", id: r1.newId, reason: "correction", replacement: "第三版" });
+
+  assert.equal(r2.superseded.text, "第二版");
+  const layer = listLayer("global", projectCwd);
+  assert.equal(layer.total, 1, "只剩最新一版有效");
+  assert.equal(layer.shards[0].entries[0].text, "第三版");
+});
+
+test("id 在同一文件内唯一，且由内容决定（同一内容同一天 id 相同）", async () => {
+  await appendMemory({ target: "global", shard: "ids", fact: "内容甲", date: "2026-01-01" });
+  await appendMemory({ target: "global", shard: "ids", fact: "内容乙", date: "2026-01-01" });
+  const entries = listLayer("global", projectCwd).shards[0].entries;
+  assert.equal(new Set(entries.map((e) => e.id)).size, 2, "同一天不同内容的 id 必须不同");
+
+  // 换成另一个分片、同样内容同样日期 → id 应相同（id 不含文件名）
+  await appendMemory({ target: "global", shard: "ids2", fact: "内容甲", date: "2026-01-01" });
+  const other = listLayer("global", projectCwd).shards.find((s) => s.name === "ids2").entries[0];
+  assert.equal(other.id, entries.find((e) => e.text === "内容甲").id);
 });
