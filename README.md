@@ -259,16 +259,38 @@ plugin_manager { action: "install_bundle", target: "dsh-memory-win" }
 > 无子进程残留）。不要一直等；确认输出后 `job_kill` 即可。另有一次在最后写
 > `package.json` 时报 `EPERM rename`（文件被占用），**重跑一次 add 即成功**。
 
-### 关于那个开关
+### 关于那个开关（实测：**热生效，不需要重启**）
 
 启用后，「设置 → 插件」里会出现 **dsh-memory-win** 一行，带一个与 `Our Free Model` 完全同构的开关。
 这是 **DSH 原生的插件启停**，不是插件自己做的：它绑定 loader 条目的 `disabled` 选项
-（`pluginManager.setBundleEnabled` / `setPluginEnabled`，返回 `applied | restart-required`）。
-**插件侧无需任何代码。**
+（`pluginManager.setBundleEnabled` / `setPluginEnabled`）。**插件侧无需任何代码。**
+
+实测确认（在 GUI 里真的点了一次关闭）：
+
+| 检查 | 结果 |
+|---|---|
+| 下一轮系统提示词 | 「长期记忆」地图段**消失** |
+| `list_plugins` | 条目总数 **189 → 188**，该条目已不在列表 |
+| 工具 | 四个 `memory_*` 全部卸载 |
+
+⇒ **点完立即生效**，下一轮就能看出效果；**干净卸载**（条目数正好 −1，无残留注入）。
+
+**重要：不要用 `install_bundle` 去重新打开插件。** 那走的是 `installBundle` 路径，里面有
+`if (Object.hasOwn(before, name)) return 'restart-required'` —— bundle 已在 `dependencies` 里，
+于是**白白要求一次重启**。直接用设置里那个开关即可，它没有这个覆盖，是热生效的：
+
+```js
+// setBundleEnabled 的实际判定（宿主实现）
+application: ownerContext.get('hmr') !== undefined ? 'applied' : 'restart-required'
+// 本 profile 的 HMR 已加载并活跃 ⇒ applied
+```
+
+**关闭 ≠ 卸载 ≠ 删数据**：`dependencies` 里的 tarball 依赖保留、`node_modules` 里的文件保留、
+记忆数据完好。关闭只是"停止启动"。
 
 注意「设置 → 插件」里带 `readOnlyReason` 的内置 bundle 是**锁定的**（开关灰掉）；
-只有 `removable: true` 且有 `rows` 的条目可切换 —— 这也是必须走 `install_bundle`
-而不是手工往 `cordis.patch.yml` 插一条的原因：手工插的行不在 bundle 注册表里，可能拿不到可用开关。
+只有 `removable: true` 且有 `rows` 的条目可切换 —— 这也是必须先 `install_bundle`
+（而不是手工往 `cordis.patch.yml` 插一条）的原因：手工插的行不在 bundle 注册表里，可能拿不到可用开关。
 
 ### 数据位置
 
