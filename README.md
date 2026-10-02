@@ -175,6 +175,31 @@ DSH 桌面版（Windows 优先）的长期记忆插件 —— **纯本地、零�
 > 这条纪律同时补上了两个场景缺口：**长上下文里丢掉的细节**（细节写进文档、记忆留指针）与
 > **严重 BUG 的过程复述**（复盘进 `docs/`，记忆只存一行因果）。判定与依据见实施进度文档 §5.5。
 
+#### 同一套分工的另一个用例：grilling 产出的术语表 / ADR
+
+`grill-with-docs` 会把术语**逐条**写进仓库根的 `GLOSSARY.md`（多 context 时是各 context 的
+`GLOSSARY.md` + 根 `GLOSSARY-MAP.md`），决策写进 ADR；`grill-me` 则**不落盘**（stateless），
+所以后者默认跨会话零复用，要复用必须显式写文件。**术语表本身不要进记忆条目** —— 它每条术语
+3 行（`**术语**:` + 定义 + `_Avoid_:` 别名），还有 `Relationships` / `Flagged ambiguities` 两节，
+塞不进单行。正解同样是**文件做正本、记忆做路由**：
+
+```js
+// 每个 context 一条指针；keywords 带上 _Avoid_ 里的废弃词
+memory_add { target: "project", shard: "glossary",
+  keywords: "术语表 glossary domain 词汇 废弃词 backlog manager backlog backend issue host",
+  fact: "项目术语表：GLOSSARY.md（含 …；多 context 见 GLOSSARY-MAP.md）" }
+```
+
+为什么要带**废弃词**：检索时片名与关键词也参与匹配，所以将来谁用了 `_Avoid_:` 里那个旧词提问，
+也能命中这行指针，再由 `read` 进 `GLOSSARY.md` 看解析结果。
+
+> ⚠️ **一处实测出来的取舍**：别名只写进**片级 keywords** 会让**整片条目**都命中；
+> 写进**条目正文**才精确命中该条。所以术语表**只留一条指针**时用 keywords 最合适；
+> 若你按术语拆成 N 条，别名要放各自的条目正文，别堆到 keywords 里。
+>
+> 另外：`GLOSSARY.md` 提交进 git ⇒ 跨机器也在；而 `.agent-memory/` 默认被 gitignore ⇒
+> **记忆指针带不走**。重要项目的指针要么把 `.agent-memory/` 也提交，要么把指针写进仓库文档。
+
 ---
 
 ## 3. 安全与稳健性（明确边界）
