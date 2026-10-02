@@ -1,0 +1,9 @@
+# 统一为 LF：本插件的记忆文件是**按行**解析的（条目 = 一行 `- [日期] 事实`），
+# 行尾不一致会让 `read offset` 取到的行号在不同平台间漂移，也会让 diff 充满噪音。
+* text=auto eol=lf
+
+# 二进制/生成物，不做行尾转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.tgz binary

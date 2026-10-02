@@ -1,0 +1,9 @@
+# dsh-memory-win bundle patch.
+#
+# 一行 insert 即挂载 Host 半身。`name` 必须是 package.json 里的完整包名。
+# 本插件只有 Host 半身（注入提示词段 + 注册三个原生工具），没有浏览器半身，
+# 所以 package.json 里不声明 `dsh.client`，设置页暂时也不需要。
+- insert:
+    - id: dsh-memory-win
+      name: 'dsh-memory-win'
+      config: {}
