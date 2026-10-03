@@ -412,14 +412,15 @@ $ node test/run.mjs
 > `runtime.callback(this.ctx, this.config)`）。⇒ **部分配置不会被宿主合并**，
 > 未写的键必须由 `lib/config.js` 补默认值。这条决定了配置层的形状，而不是反过来。
 
-### 宿主内端到端验证（真实会话内 12 轮）
+### 宿主内端到端验证（真实会话内 13 轮）
 
 第 3 轮出过一次 ❌（四工具全丢），已在当轮修掉；其余各轮全部通过。
 **净结果：所有已交付功能都在真实宿主里实测过；11 轮共暴露 5 个真实缺陷**（守卫只覆盖一层、
 `inject` 静默丢工具、部署未同步、同日不可取代、**0.2.1 在无记忆的仓库里凭空建目录**），
 均已修复并补了回归用例；第 7、8 轮无新缺陷，第 10 轮（0.2.4）验证归档动作并发现一处**口径问题**，
 第 11 轮（0.2.5）验证效果日志四项指标并闭合 V8①，**无新缺陷**；
-**第 12 轮（2026-10-04，in-history 路由治理）**在同一会话内完成"基线复现 → 适配器补丁 → 复测"两段式对照，写入悬崖 110,613 → 5,267，**无新缺陷**（证据见下）。
+**第 12 轮（2026-10-04，in-history 路由治理）**在同一会话内完成"基线复现 → 适配器补丁 → 复测"两段式对照，写入悬崖 110,613 → 5,267，**无新缺陷**（证据见下）；
+**第 13 轮（0.2.6 重启）** 实测 `write_alarm` 上线：双路径静默周期（add `3,842` / correct `2,715`，均 ≤10K、全量日志 0 告警）+ 测试 170，**无新缺陷**。
 
 | 轮 | 触发 | 验了什么 | 结果 |
 |---|---|---|---|
@@ -435,6 +436,7 @@ $ node test/run.mjs
 | 10 | **重启 0.2.4** | **真实的归档动作**（放一条 2026-09-30 的失效数据 → 自动清理把它整片搬走）+ **D6 修正在宿主内生效** | ✅ 两项都通过 |
 | 11 | **重启 0.2.5 + profile 开 `logEnabled`** | 效果日志四项指标（`inject.chars` / `search` / `add` 小时计数 / `usage` 命中率）+ **V8① 非默认配置传导** + 与宿主投影的同源对账 | ✅ 全部通过，**无新缺陷**（证据见下） |
 | 12 | **in-history 补丁 + 重启（2026-10-04）** | 写入悬崖两段式对照：基线复现（`uncached 110,613`，同为"长度不变内容变了"型）→ our-free-model 适配器补 `systemPromptUpdate:'in-history'` → 复测（**5,267 ≤10K** / 次步 **0.9904** / 网关接受中段 system / 新图战胜旧图）+ **双层守护断言上线** | ✅ 三件套全过，**切换线与告警线均未触发** |
+| 13 | **0.2.6 重启（2026-10-04）** | `write_alarm` 上线四验（spec / 版本 / 逐字节 / 告警代码）→ 装载无错 → **双路径静默周期**：add 写入步 `3,842`、correct 写入步 `2,715`（均 ≤10K、无告警行）→ 测试 **170/170** | ✅ 告警链路走通，**无新缺陷** |
 
 关键几条：
 
@@ -528,19 +530,21 @@ $ node test/run.mjs
 > 定性是"两段式对照 + n=1 行为探针"，不是隔离实验室：写入频率实测 1 次 add / 178 条 usage 行，
 > 悬崖绝对量随会话历史长度缩放（判据看形态与阈值，不看绝对量）。机制取证与完整推演见进度文档 §3.26。
 
-### 本机当前安装状态（0.2.5 装入后核对）
+### 本机当前安装状态（0.2.6 装入后核对）
 
 ```
 profile:      ~/.dsh/profiles/desktop
-dependencies: dsh-memory-win → file:%USERPROFILE%/.dsh/plugin-tarballs/dsh-memory-win-0.2.5.tgz
+dependencies: dsh-memory-win → file:%USERPROFILE%/.dsh/plugin-tarballs/dsh-memory-win-0.2.6.tgz
 bundles:      dsh.profile.bundles 里含 dsh-memory-win（当前**启用**，即开关处于打开状态）
 产物比对:     node_modules/dsh-memory-win/ 的 index.js / package.json / cordis.patch.yml
               / lib/*.js —— 14 个运行期文件与仓库**逐字节一致**（SHA-256 比对）
-tarballs:     ~/.dsh/plugin-tarballs/ 下 dsh-memory-win 只剩 0.2.5（0.2.4 已删，避免误装）
+tarballs:     ~/.dsh/plugin-tarballs/ 下 dsh-memory-win 有 0.2.6（当前）与 0.2.5（回滚备份）
 config:       profile 的 cordis.patch.yml 已加 logEnabled: true
               （原文件备份为 cordis.patch.yml.bak-20261003；重启后日志开始落盘）
 生效状态:     0.1.3 / 0.1.4 / 0.2.1（第 9 轮）/ 0.2.4（第 10 轮）均已重启实测生效；
-              0.2.5（效果日志）**第 11 轮重启实测通过**（四项指标 + V8①，见上面的第 11 轮证据）
+              0.2.5（效果日志）**第 11 轮重启实测通过**（四项指标 + V8①，见上面的第 11 轮证据）；
+              0.2.6（write_alarm + 字段断言）**第 13 轮重启实测通过**（装载无错、双路径静默周期
+              add 3,842 / correct 2,715 均 ≤10K 无告警行、全量日志 write_alarm 命中 0、测试 170/170）
 ```
 
 > `README.md` / `LICENSE` 不参与运行，所以别把它们算进"源码是否同步"的比对里。
@@ -591,6 +595,7 @@ config:       profile 的 cordis.patch.yml 已加 logEnabled: true
    修法是**取消嵌套**：读-改-写整个包进同一个 op，由 `lib/fs-utils.js` 的 `writeAtomically` 负责唯一落盘。
    > 排查过程本身也值得记一笔：这个现象看起来像"fs 调用被沙箱挡住了"，实际是纯逻辑死锁 ——
    > 定性靠的是**给 op 打点**（`op1 ran` 出现、`op2` 不出现），而不是继续猜沙箱。
+8. **网关会偶发把整段前缀驱逐（2026-10-04 实测）**：`turn27 step1` 在**无任何写入、注入逐字不变**的相邻两步之间出现 `cacheRead=0 / uncached=329,722 / hitRate=0`，下一步立即 `714 / 329,664、hitRate=0.9978` —— 内容没变，是服务端把缓存整段丢了、按内容重算一步后重新命中。这类整段 miss **不在 `write_alarm` 覆盖面内**（告警按设计只在写入置位后的那一步判读），也不与"空 15.5 分钟仍命中"的 TTL 观察冲突：驱逐是概率性的、不是固定间隔。判读口径：看 usage 行配对的 `inject` / `add` 事件 —— **没有事件变化的整段 miss 归因上游**，不追插件。
 
 ---
 
@@ -605,7 +610,7 @@ node test/run.mjs
 node scripts/pack.mjs
 
 # 3) 装进桌面版 profile（会改动 ~/.dsh/profiles/desktop，建议先备份）
-dsh plugin --profile desktop add "file:C:/Users/<你>/.dsh/plugin-tarballs/dsh-memory-win-0.2.5.tgz"
+dsh plugin --profile desktop add "file:C:/Users/<你>/.dsh/plugin-tarballs/dsh-memory-win-0.2.6.tgz"
 ```
 
 ### ⚠️ 为什么必须用 tarball，而不是 `file:` 目录
