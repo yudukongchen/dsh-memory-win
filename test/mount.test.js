@@ -13,14 +13,16 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 
 import { apply, inject, name as pluginName } from "../index.js";
-import { SECTION_NAME } from "../lib/map.js";
+import { logFilePath, resetLogForTests } from "../lib/log.js";
+import { SECTION_NAME, renderMap } from "../lib/map.js";
 import { PROJECT_DIR_NAME } from "../lib/paths.js";
+import { allTools } from "../lib/tools.js";
 
 const savedDshHome = process.env.DSH_HOME;
 let sandbox;
@@ -376,8 +378,15 @@ test("两条守卫路径**同时**挂载（不是二选一）", () => {
   // 导致 DSH 有 guard 时项目层分支从不执行、<repo>/.agent-memory 的直写不被拦。
   // 该绕过硬真实宿主实测确认后改成两条都挂。
   assert.equal(record.guards.length, 1, "应注册单调守卫");
-  assert.equal(record.listeners.length, 1, "同时应挂 pre-execute waterfall");
+  const waterfalls = record.listeners.filter((l) => l.event === "tools/pre-execute");
+  assert.equal(waterfalls.length, 1, "同时应挂 pre-execute waterfall");
   assert.equal(record.listeners[0].event, "tools/pre-execute");
+  // 0.2.5：效果日志的 usage 订阅也在这里挂（开关在回调里查，见 lib/log.js）
+  assert.equal(
+    record.listeners.filter((l) => l.event === "session/event").length,
+    1,
+    "效果日志应挂 session/event",
+  );
 });
 
 test("同步 guard 覆盖**全局层**：命中即返回拒绝原因字符串", () => {
@@ -429,7 +438,8 @@ test("waterfall 路径同样覆盖项目层，且在守卫异常时无副作用�
   const { ctx, record } = fakeCtx({ withGuard: false });
   apply(ctx);
   assert.equal(record.guards.length, 0, "无 guard() 时不注册单调守卫");
-  assert.equal(record.listeners.length, 1, "仍必须挂 waterfall");
+  const waterfalls = record.listeners.filter((l) => l.event === "tools/pre-execute");
+  assert.equal(waterfalls.length, 1, "仍必须挂 waterfall");
 
   const guard = record.listeners[0].listener;
   let nextCalled = 0;
@@ -603,4 +613,133 @@ test("注入纪律块写明归档规则（含失效天数与归档目录名）",
   assert.match(text, /archive\//);
   assert.match(text, /memory_cleanup/);
   assert.match(text, /活条目永远不会被搬走/);
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 0.2.5：效果日志的接线层
+//
+// log.test.js 测的是 lib/log.js 本身；这里测的是**它接上去之后**：
+// 包装不改变工具行为、关着时注入逐字节不变、开着时真的落盘、两条守卫路径都留痕。
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * 读效果日志的事件行（逐行 JSON.parse，顺带验证 JSONL 合法性）。
+ *
+ * @returns {object[]} 事件数组；文件不存在时为空数组。
+ */
+function readLogLines() {
+  const file = logFilePath();
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8")
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => JSON.parse(line));
+}
+
+test("0.2.5：logEnabled=true 时工具包装**不改变返回值**（读工具逐字节一致）", async () => {
+  resetLogForTests();
+  const { ctx, record } = fakeCtx();
+  apply(ctx, { logEnabled: true });
+  const wrapped = Object.fromEntries(record.tools.map((t) => [t.name, t]));
+  const raw = Object.fromEntries(allTools().map((t) => [t.name, t]));
+  const exec = { agent: { session: { header: { cwd: projectCwd }, id: "session-1" } } };
+
+  // 读工具可幂等对比：包装前后两次调用看到同样的记忆状态
+  const listA = await wrapped.memory_list.execute({ entries: true }, exec);
+  const listB = await raw.memory_list.execute({ entries: true }, exec);
+  assert.deepEqual(listA, listB, "memory_list 返回值必须逐字节一致");
+
+  const searchA = await wrapped.memory_search.execute({ query: "pwsh" }, exec);
+  const searchB = await raw.memory_search.execute({ query: "pwsh" }, exec);
+  assert.deepEqual(searchA, searchB, "memory_search 返回值必须逐字节一致");
+
+  // 日志并存：search 记一行、list 不记（Q22）
+  const lines = readLogLines();
+  assert.deepEqual(lines.map((l) => l.ev), ["search"]);
+  assert.equal(lines[0].query, "pwsh");
+  assert.equal(lines[0].session, "session-1", "能拿到就带 session（Q16）");
+
+  // 写工具：返回值形状照旧，且 add 事件落下
+  const added = await wrapped.memory_add.execute({ fact: "包装一致性探针", shard: "wrap" }, exec);
+  assert.equal(added.ok, true);
+  const after = readLogLines();
+  assert.equal(after[after.length - 1].ev, "add");
+  assert.equal(after[after.length - 1].shard, "wrap");
+});
+
+test("0.2.5：logEnabled=false（默认）时注入文本与不记日志的版本完全一致", () => {
+  resetLogForTests();
+  const { ctx, record } = fakeCtx();
+  apply(ctx);
+  const section = record.sections[0];
+  const text = section.text({ agent: { session: { header: { cwd: projectCwd } } } });
+  assert.equal(text, renderMap({ cwd: projectCwd }), "日志开关不得改变注入的任何一个字符");
+  assert.equal(existsSync(logFilePath()), false, "关着时不落盘");
+});
+
+test("0.2.5：logEnabled=true 时注入记一行，chars 与返回文本长度一致、parts 校验和闭合", () => {
+  resetLogForTests();
+  const { ctx, record } = fakeCtx();
+  apply(ctx, { logEnabled: true });
+  const section = record.sections[0];
+  const text = section.text({ agent: { session: { header: { cwd: projectCwd } } } });
+
+  const lines = readLogLines();
+  assert.equal(lines.length, 1);
+  const line = lines[0];
+  assert.equal(line.ev, "inject");
+  assert.equal(line.seq, 1);
+  assert.equal(line.chars, text.length, "记下的 chars 必须就是本轮真正注入的长度");
+  const sum = line.parts.discipline + line.parts.global + line.parts.project + line.parts.other;
+  assert.equal(sum, line.chars, "分项之和 === 总长（校验和闭合）");
+  assert.equal(line.cwd, projectCwd, "inject 拿不到 session id，但 cwd 可以（Q16）");
+  assert.deepEqual(line.modes, { global: "empty", project: "empty" }, "两层都还没记忆");
+});
+
+test("0.2.5：两条守卫路径的拒绝都留痕（同步 guard + waterfall）", async () => {
+  resetLogForTests();
+  const { ctx, record } = fakeCtx();
+  apply(ctx, { logEnabled: true });
+
+  // 同步 guard 路径
+  const guard = record.guards[0];
+  const denied = guard({ name: "write", arguments: { file_path: join(fakeHome, "memory-win", "global", "x.md") } });
+  assert.equal(typeof denied, "string", "前置：拒绝仍然生效");
+
+  // waterfall 路径
+  const waterfall = record.listeners.find((l) => l.event === "tools/pre-execute").listener;
+  const decision = await waterfall(
+    {
+      name: "edit",
+      arguments: { file_path: join(projectCwd, PROJECT_DIR_NAME, "y.md") },
+      agent: { session: { header: { cwd: projectCwd } } },
+    },
+    async () => ({ kind: "allow" }),
+  );
+  assert.equal(decision.kind, "deny");
+
+  // 放行的调用不产生事件
+  guard({ name: "read", arguments: { file_path: join(fakeHome, "memory-win", "global", "x.md") } });
+
+  const lines = readLogLines();
+  assert.deepEqual(lines.map((l) => l.ev), ["guard_deny", "guard_deny"]);
+  assert.equal(lines[0].tool, "write");
+  assert.match(lines[0].path, /x\.md$/);
+  assert.equal(lines[1].tool, "edit");
+  assert.match(lines[1].path, /y\.md$/);
+});
+
+test("0.2.5：非法配置且显式开日志 → config_error 落盘后照常拒绝启动", () => {
+  resetLogForTests();
+  const { ctx } = fakeCtx();
+  assert.throws(() => apply(ctx, { logEnabled: true, inlineTextMax: 3000, factBodyMax: 2000 }), /不能大于 factBodyMax/);
+
+  const lines = readLogLines();
+  assert.equal(lines.length, 1, "拒绝启动之前先留痕");
+  assert.equal(lines[0].ev, "config_error");
+  assert.match(lines[0].message, /inlineTextMax/);
+
+  // 开关没开（或没写）时：同样非法，但一个字都不写
+  assert.throws(() => apply(ctx, { inlineTextMax: 3000, factBodyMax: 2000 }), /不能大于 factBodyMax/);
+  assert.equal(readLogLines().length, 1, "没显式开日志就不落盘");
 });

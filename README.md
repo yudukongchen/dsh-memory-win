@@ -2,11 +2,15 @@
 
 DSH 桌面版（Windows 优先）的长期记忆插件 —— **纯本地、零依赖、零 shell、零外部服务**。
 
-> **当前状态（2026-10-03）**：版本 **0.2.4** ｜ 26 个文件 ｜ 测试 **146 / 146 通过**（`node test/run.mjs`）｜
+> **当前状态（2026-10-03）**：版本 **0.2.5** ｜ 28 个文件 ｜ 测试 **164 / 164 通过**（`node test/run.mjs`）｜
 > 已装入本机 desktop profile 并逐项实测 —— 两层分区、五个工具、双路写入守卫、四类记忆修正、启停开关热切换。
 >
 > 0.2.4 的两项增量：**配置层**（所有行为阈值收敛到 `lib/config.js`，改 profile 的 `config:` 段即可）
 > 与**容量策略**（当天首次启动延迟 10 秒，把已失效条目与空分片物理归档）。
+>
+> **0.2.5 的增量是效果日志**（`logEnabled`，默认关）：逐事件记录注入分项字符数、检索关键词、
+> 每小时写入计数与与设置页同分母的 KV 命中率，见第 2 节「效果日志」。
+> **代码与测试已就绪，尚未装入本机 profile**（升版本 → pack → add → 重启那四步待执行）。
 >
 > 这仍是 **demo**：实现刻意最小化，但核心机制与安全边界是完整的、有测试覆盖的。
 > 完整的功能实施进度、宿主内实测记录、踩过的坑与已知限制见仓库外那份
@@ -189,6 +193,63 @@ DSH 桌面版（Windows 优先）的长期记忆插件 —— **纯本地、零�
 > 教训：这次的信号**不在代码里、也不在单测里，而在文件系统上** —— 单测只断言"归档了什么"，
 > 没断言"**没做什么**"。回归用例现在补上了这一条。
 
+### 效果日志：`logEnabled`（0.2.5）
+
+给插件做"体检"的旁路日志：**默认关**，用 profile 的 `config: { logEnabled: true }` 打开（改完重启）。
+它回答两类问题 —— **注入体积在怎么变**与**缓存命中怎么样** —— 不是调试 trace。
+
+**落点**：`<全局层目录的上一级>\logs\debug.jsonl`（默认 `%DSH_HOME%\memory-win\logs\`）。
+每事件一行 JSON（JSONL）；单文件 **1 MB 轮转**成 `debug.prev.jsonl`（只留一份 ——
+日志自己不能成为"单调恶化"的新缺口）。它与全局层**平级**，而层目录的 `readdir` 只取 `*.md`，
+所以日志**不进地图、不被归档扫描读到**；写入守卫只拦宿主的 `write`/`edit`，不拦插件自身 fs。
+
+**事件清单**：
+
+| ev | 何时写 | 字段（要点） |
+|---|---|---|
+| `inject` | 每轮装配 | `seq` 自增、`chars` 总长、`parts` 分项（纪律块 / 全局 / 项目 / 其它含分隔符）、`modes` 各层档位（`inline`/`map`/`empty`/`unavailable`）、`cwd` |
+| `inject_error` | 渲染抛错 | 错误消息（过 `{{` 中和 + 凭据扫描后才落盘） |
+| `search` | `memory_search` 返回 | `query` + `hits`（**零命中照记** —— 那是"关键词没写全"的直接证据）+ `shards` 去重分片名（带层前缀，同名不同层不歧义）；**不记正文、不记 id** |
+| `add` | `memory_add` 返回 | `hour`（自然小时 · 本地时区）+ `hourCount`（该小时当前累计）+ `target`/`shard` |
+| `correct` | `memory_correct` 返回 | `reason`、`id`、`target`/`shard` |
+| `cleanup` | `memory_cleanup` 返回 | `ran`、`archived`（分片数）、`entries`（条目数累加）、`removedShards` |
+| `usage` | 每轮响应 | `session`、`turn`/`step`、`kind`、`tokens` 四元组（uncached/cacheRead/cacheWrite/output）、`hitRate`、`seqRef` 回指最近一次 `inject` |
+| `guard_deny` | 守卫拒绝直写 | `tool`、`path` —— 安全事件必须留痕 |
+| `config_error` | 启动时配置非法**且**显式开着日志 | 错误消息（拒绝启动的原语义不变，先留痕再抛） |
+
+`memory_list` **不记**（五个工具里最无趣的一个；真要过滤事后一行 `rg -v` 即可，**漏记却补不回来**）。
+`memory_add` 被校验拒绝（`execute` 抛错）不产生事件，也不计入 `hourCount` —— "次数"口径是**完成的调用**。
+
+**KV 命中率口径**：`hitRate = cacheRead / (uncached + cacheRead + cacheWrite)` ——
+**与设置页「缓存命中 N%」是同一个分母**（实读宿主 `app.asar:395653` 与投影 `uncachedInputTokens = usage.inputTokens`
+确认），所以日志与 UI 永远对得上；原始四元组都记着，其它口径事后一行可算。
+数据走 `session/event` 总线（与宿主 token-meter 同一条），`assistant/attempt` 的用量从流末 usage chunk 取
+（与宿主 `usageOf` 同构）—— 因此**失败/中断的尝试也有记录**。
+
+**聚合时注意三条**（都是诚实声明，不是隐藏行为）：
+
+1. `kind:"attempt"` 与同 `(session, turn, step)` 的 `kind:"message"` 是**替换关系**（最终消息替换同一次尝试的流式用量）——
+   聚合优先只用 `message` 行；没有 `message` 的 `attempt`（失败/中断）才是该步的唯一记录。
+2. `seqRef` 是**时间相邻级**的关联：inject 侧拿不到会话 id（宿主 `AssembleContext` 只有 `{scope, signal}`），
+   多会话并行时它可能指错最近一次注入 —— 会话归属一律以事件自己的 `session` 字段为准。
+3. 事件凡拿得到就带 `session` + `cwd`；`inject` 行**没有** `session`（诚实留空），靠 `cwd` + 时间戳邻近关联。
+
+**写入计数不落 `.state.json`**：`hourCount` 的正本就是 JSONL —— 进程内第一次碰到某个自然小时时，
+回读当前与轮转掉的两份日志数出该小时已有的 `add` 行做种子。状态文件因此**零改动**
+（它的 `sanitizeState` 会丢弃不认识的字段，往里加计数器反而要动两处既有纪律）。
+
+**三条失效纪律**：① 写失败**静默停写**（进程内一次失败即停，不重试不报错 ——
+不该给注定失败的磁盘每轮刷屏）；② 所有日志入口**永不抛**（`logInjectError` 跑在注入回调的 catch 里，
+它若抛错连降级文案都到不了）；③ 关闭时**零副作用**（不建目录、不读文件，订阅照挂但回调第一行就返回）。
+
+**开销**：关 = 一次 boolean 比较；开 = 每轮一次同步 append（一行几十到几百字节）+ 每次工具调用后一次。
+日志文件不在任何注入/检索/写入的必经路径上。
+
+> **验证状态（如实标注）**：单测 164 例全绿，含「关时注入逐字节不变」「包装不改变返回值」
+> 「分项校验和闭合」「与 UI 同分母」「种子回读」「写失败即停写」；
+> **宿主内的 KV 对账未做** —— 需装入 0.2.5、开 `logEnabled` 跑真实会话，把 `usage` 行与设置页
+> 「缓存命中 N%」比对（见第 4 节"仍未验证"）。
+
 ### 长内容：**文档 + 指针**（0.1.3 起写进注入纪律块）
 
 一条记忆**只能是单行**（≤ `factBodyMax`，默认 2000 字符，见第 3 节的校验），所以**复盘 / 排查过程 / 长清单塞不进记忆**。
@@ -314,25 +375,26 @@ memory_add { target: "project", shard: "glossary",
 
 ## 4. 验证结果
 
-### 单元测试：146 / 146 通过
+### 单元测试：164 / 164 通过
 
 ```
 $ node test/run.mjs
-# tests 146
-# pass 146
+# tests 164
+# pass 164
 # fail 0
-# duration_ms 823.5082
+# duration_ms 1635.9225
 ```
 
 | 测试文件 | 用例数 | 覆盖内容 |
 |---|---:|---|
 | `test/format.test.js` | 23 | 日期合法性（含闰年、`2026-13-45` 进位陷阱）、凭据扫描（含"不得回显凭据"断言）、`{{` 中和、条目解析行号、代码围栏跳过、去重语义、**条目 id 的稳定性与唯一性**、**取代元数据拆解**、**正文保留语法拒绝** |
 | `test/paths.test.js` | 10 | `DSH_HOME` 优先级、**`HOME` 缺失时绝不为空串**、`projectRoot` 落在 `.agent-memory` 且 cwd 缺失时失败关闭、slug 跨平台稳定、`displayPath` 相对化、shard 路径逃逸拒绝、`isAbsoluteAny` |
-| `test/config.test.js` | 14 | 默认值完整性、**解析顺序（默认 < `config:` 段）**、未知键前向兼容、类型/范围非法一律抛、**交叉约束 `inlineTextMax ≤ factBodyMax`**、`globalSubpath` 逃逸拒绝、**配置值真的被行为层读到**（改配置后截断与校验同时跟着变）、未知键名抛错、快照不污染、**凭据模式表整段替换 + `g`/`y` 标志剥离** |
+| `test/config.test.js` | 15 | 默认值完整性、**解析顺序（默认 < `config:` 段）**、未知键前向兼容、类型/范围非法一律抛、**交叉约束 `inlineTextMax ≤ factBodyMax`**、`globalSubpath` 逃逸拒绝、**配置值真的被行为层读到**（改配置后截断与校验同时跟着变）、未知键名抛错、快照不污染、**凭据模式表整段替换 + `g`/`y` 标志剥离**、**`logEnabled` 默认 false / 非 boolean 拒绝（与 `cleanupEnabled` 同一张校验表）** |
 | `test/engine.test.js` | 43 | 建片、追加、完全重复与"同事实换日期"的区分、凭据/日期/多行拒绝、两层隔离、**20 路并发追加一条不丢**、链槽位复用、**取代语义**（旧条目不再进地图/不再被检索命中、行号不变、历史保留、`retract`、二次修正、时间线倒挂拒绝、跨分片查找、找不到 id 时零改动）、**P2a 片路径相对化 + `memory_search` 必须给绝对路径**、**P2b 关键词四种情形与四类非法输入**、**P10 超长正文写入成功但必须回 warning（含正好等于上限的边界、与 keywords 提醒合并、`memory_correct` 同样提醒）** |
 | `test/cleanup.test.js` | 19 | **容量策略**：只搬"已失效且过宽限期"的条目、**活条目永不被归档**（含"很老且没被检索过"）、宽限期内不动手、**宽限期内被取回过的再等一轮**、整片失效时删掉空分片、同一条只搬一次、层视图与归档数、**当天只跑一次（`lastCleanup` 落盘）**、`cleanupEnabled=false` 完全不动手、两层互不干扰、**从 `storages/workspace.json` 发现其它工作区并清理**、该文件读不懂时降级不抛、`access` 计划只含真正返回的条目、命中记录按日粒度不重复写盘 |
 | `test/map.test.js` | 10 | 空态纪律块、**纪律块写明「长内容 → 文档 + 指针」**（含"写文档不受守卫限制"与"不该记过程"互相指向）、小层内联（含 `#id`）、超阈值切地图、**头行不含数字**、统计在段尾、`{{` 中和、无 cwd 时声明不可用 |
-| `test/mount.test.js` | 27 | 段注册、**五工具** schema 形状、`execute` 返回值 → `render` 一致、**两条守卫路径同时挂载**、**同步 guard 覆盖项目层（含回归用例）**、守卫异常时无副作用放行、**`memory_correct` 端到端**、**`memory_list entries=true` 补住"搜不到就无法修正"的缺口**、**`tools` 必须在 `inject` 里**、无 `tools` 服务时显式失败、**P10 提醒真的渲染进工具输出（两个工具各一条）**、**0.2.4：`apply(ctx, config)` 非法配置拒绝启动、配置改动真的到达工具描述、`memory_cleanup` 三处一致、纪律块写明归档规则** |
+| `test/log.test.js` | 12 | **效果日志（0.2.5）**：关 = 零写盘零副作用、开 = 每事件一行合法 JSONL、**1 MB 轮转只留一份**、**小时累计种子从 JSONL 回读**、**写失败即停写**（不抛不重试）、**命中率与 UI 同分母**（含 `cacheWrite>0` 与分母 0 边界）、usage 四元组 + `seqRef` 回指 + attempt 流末 chunk、**零命中 search 照记**、**`memory_list` 不记**、注入分项**校验和闭合**（parts 之和 === chars === 文本长度）、config/inject 错误消息过中和与凭据扫描 |
+| `test/mount.test.js` | 32 | 段注册、**五工具** schema 形状、`execute` 返回值 → `render` 一致、**两条守卫路径同时挂载**、**同步 guard 覆盖项目层（含回归用例）**、守卫异常时无副作用放行、**`memory_correct` 端到端**、**`memory_list entries=true` 补住"搜不到就无法修正"的缺口**、**`tools` 必须在 `inject` 里**、无 `tools` 服务时显式失败、**P10 提醒真的渲染进工具输出（两个工具各一条）**、**0.2.4：`apply(ctx, config)` 非法配置拒绝启动、配置改动真的到达工具描述、`memory_cleanup` 三处一致、纪律块写明归档规则**、**0.2.5 效果日志接线：包装不改变返回值、关时注入逐字节不变、开时 `chars` = 返回文本长度、两条守卫路径都留痕、`config_error` 落盘后照常拒绝启动** |
 
 其中「挂载」层断言的三条宿主契约（`systemPrompt.section` 的 `text` 可传函数、`tools.register` 收**原始 JSON Schema** 且 `execute` 返回普通 JSON 值由 `output.render` 转换、`tools.guard` 返回拒绝原因字符串）是**实读 DSH 运行时 bundle 得到的**，不是照 TypeScript 声明推测的。
 
@@ -432,7 +494,12 @@ tarballs:     ~/.dsh/plugin-tarballs/ 下只剩 0.2.4（旧版均已删，避免
 ```
 
 > `README.md` / `LICENSE` 不参与运行，所以别把它们算进"源码是否同步"的比对里。
-> 运行期文件从 0.1.x 的 **10 个**变成 **13 个**：新增 `lib/config.js`、`lib/state.js`、`lib/fs-utils.js`。
+> 运行期文件从 0.1.x 的 **10 个**变成 **13 个**：新增 `lib/config.js`、`lib/state.js`、`lib/fs-utils.js`；
+> 0.2.5 起是 **14 个**（再增 `lib/log.js`，效果日志）。
+>
+> **0.2.5（效果日志）状态**：源码与 164 例测试就绪、`version` 已升 —— 但**还没跑 pack/add**，
+> 所以上面这份"装入状态"描述的仍是 0.2.4。装入流程见第 5 节四步，装完记得在 profile 的
+> `config:` 段加 `logEnabled: true` 才会开始写日志（再重启一次）。
 
 > ⚠️ **改 `lib/*.js` 或改 profile 的 `config:` 段后必须重启桌面版**：profile 的 HMR 只监听 patch 文件，
 > 不监听插件模块文件（见下面环境事实 5）。0.1.3 就是这样：安装后需重启，「长内容」纪律才出现在系统提示词里。
@@ -441,7 +508,15 @@ tarballs:     ~/.dsh/plugin-tarballs/ 下只剩 0.2.4（旧版均已删，避免
 
 - **配置层只验证了"默认值"这条路径**：第 9 轮证明了配置**从 config 取值**（工具描述里的 2000/160/8 来自配置而非硬编码），但**没有**验证"改 `config:` 段成非默认值后行为真的跟着变"（那需要再改一次 patch + 重启一次）。
   依据链：单测里有"改了 `inlineTextMax` 后截断与写入校验同时跟着变"的断言，且配置项的读取点已全线收敛到 `configNum()`；缺的只是**宿主内的一次非默认取值实测**。
-- **提示词前缀缓存的实际命中率**：本机无法测量 KV cache，需要能读 provider 侧 cache 统计的环境。
+- **提示词前缀缓存的实际命中率**：~~本机无法测量 KV cache，需要能读 provider 侧 cache 统计的环境。~~
+  **0.2.5 改判**：数据在本机是可得的 —— 实读宿主源码证实每轮 `usage`（含 `cacheReadTokens`）随
+  `assistant/message` 事件广播并落盘，设置页「缓存命中 N%」就是拿 `tokenUsage` 投影算的
+  （`app.asar:395643`）。**但"实测过"的仍是单测里的算式与事件形状**：真实会话里把日志 `usage` 行
+  与设置页百分比对账这一步还没跑（见下条）。
+- **0.2.5 效果日志的宿主内实测未做**：装入 0.2.5、profile 开 `logEnabled: true`、跑真实会话后，
+  逐事件核对 —— `inject.chars` 与系统提示词实际长度一致、`usage.hitRate` 与设置页同刻百分比一致、
+  轮转与停写在真实磁盘上按预期发生。缺的只是这轮实测，机制本身有 164 例回归压着。
+  （0.2.5 **尚未装入**本机 profile，四步部署流程待执行。）
 - **多会话并发**：当前只有单进程内的并发回归测试（20 路追加），没有两个桌面版会话同时写同一分片的实测。
 - **跨进程并发写**：串行化是进程内的，跨进程是**已声明的限制**（见第 3 节限制 4）。
 - **归档在真实数据量下的收益**：第 10 轮验证了归档**动作正确**（搬谁、留在哪、文件如何消失），但没有实测"12 片 / 若干失效条目时地图与文件体积各降多少"。
@@ -479,7 +554,7 @@ node test/run.mjs
 node scripts/pack.mjs
 
 # 3) 装进桌面版 profile（会改动 ~/.dsh/profiles/desktop，建议先备份）
-dsh plugin --profile desktop add "file:C:/Users/<你>/.dsh/plugin-tarballs/dsh-memory-win-0.2.4.tgz"
+dsh plugin --profile desktop add "file:C:/Users/<你>/.dsh/plugin-tarballs/dsh-memory-win-0.2.5.tgz"
 ```
 
 ### ⚠️ 为什么必须用 tarball，而不是 `file:` 目录
@@ -511,11 +586,11 @@ profile 配置为 `nodeLinker: hoisted`，`file:` **目录**依赖会被 pnpm �
 ```powershell
 # 每次改动源码后的固定流程
 # 1) 升版本号（必须！否则下面的 add 会静默跳过）
-#    编辑 package.json 的 "version": "0.2.4" -> "0.2.5"
+#    编辑 package.json 的 "version": "0.2.5" -> "0.2.6"
 # 2) 打包并复制到 ~/.dsh/plugin-tarballs/
 node scripts/pack.mjs
 # 3) 装新版本（路径变了，pnpm 才会真正重装）
-dsh plugin --profile desktop add "file:C:/Users/<你>/.dsh/plugin-tarballs/dsh-memory-win-0.2.5.tgz"
+dsh plugin --profile desktop add "file:C:/Users/<你>/.dsh/plugin-tarballs/dsh-memory-win-0.2.6.tgz"
 # 4) 重启桌面版
 ```
 
@@ -588,6 +663,7 @@ application: ownerContext.get('hmr') !== undefined ? 'applied' : 'restart-requir
 | 项目 | `<会话工作目录>\.agent-memory\*.md` |
 | 归档（每层各一个） | `<层目录>\archive\<分片名>.md` —— 不在注入里，用 `memory_cleanup` 查看 |
 | 状态（每层各一个） | `<层目录>\.state.json` —— 检索命中记录 + 当天清理标记，不是记忆 |
+| 效果日志（全插件一个） | `<全局层上级>\logs\debug.jsonl`（默认 `%DSH_HOME%\memory-win\logs\`）—— **仅 `logEnabled: true` 时存在**，1 MB 轮转出 `debug.prev.jsonl` |
 
 项目层放在仓库内、且默认被 `.gitignore` 忽略（`dsh-memory-win/.gitignore` 只覆盖自身仓库；**使用者的仓库需自行忽略 `.agent-memory/`**）。
 
@@ -624,6 +700,7 @@ application: ownerContext.get('hmr') !== undefined ? 'applied' : 'restart-requir
 | `cleanupDays` | 3 | **1**–10000 | 失效条目**满几天后**可归档。判据：`失效日期 ≤ 今天 − cleanupDays`（**含边界**，即"满 N 天"就该搬；默认 3 ⇒ 3 天前失效的今天就归档）|
 | `cleanupDelaySeconds` | 10 | 0–86400 | 当天首次启动后延迟多少秒触发清理（0 = 立即，测试用） |
 | `cleanupEnabled` | `true` | 布尔 | 是否启用容量策略（后台清理 + `memory_cleanup`） |
+| `logEnabled` | `false` | 布尔 | **效果日志**开关：逐事件写 `<全局层上级>/logs/debug.jsonl`（见第 2 节「效果日志」）；改完要重启 |
 | `maxProjectLayers` | 20 | 0–10000 | 一次后台清理最多处理多少个已知工作区的项目层 |
 | `credentialPatterns` | `null` | 对象或 `null` | `{ 模式名: 正则字符串 }`，**整段替换**内置 8 类；`null` = 用内置表 |
 | `archivePointer` | （见源码） | 非空串 | 纪律块里那句"归档是什么、去哪找"的文本 |
@@ -660,20 +737,23 @@ Rename-Item .dsh-memory .agent-memory
 ## 6. 代码结构
 
 ```
-index.js             插件挂载：initConfig(config) + section + 五工具 + 双路守卫 + 当天首次清理定时器
+index.js             插件挂载：initConfig(config) + section + 五工具（包装 execute 记效果日志）
+                     + 双路守卫（拒绝留痕）+ 当天首次清理定时器 + session/event usage 订阅
                      （inject: ["systemPrompt", "tools"]）
-lib/config.js        配置层：默认值 / 解析顺序 / 启动校验 / 凭据模式表（0.2.4）
+lib/config.js        配置层：默认值 / 解析顺序 / 启动校验 / 凭据模式表（0.2.4；0.2.5 加 logEnabled）
 lib/paths.js         路径与 slug —— Windows 适配核心，全部调用时求值；含日期窗口工具
 lib/format.js        纯函数：条目格式/日期/凭据/去重、条目 id、取代元数据、{{ 中和、截断提醒
 lib/fs-utils.js      文件读写唯一实现处：安全读、原子写、按文件串行链（分片与状态共用，0.2.4）
 lib/state.js         每层 .state.json：检索命中记录、当天清理标记、归档判定纯函数（0.2.4）
 lib/engine.js        存储：分层、扫描、检索、原子追加/取代、容量策略（cleanupLayer/runCleanup，0.2.4）
-lib/map.js           地图档注入渲染 + 注入纪律块（取回/写入/长内容指针/修正/归档）
-lib/tools.js         五个 ToolDefinition
-lib/guard.js         write/edit 直写守卫（两条路径共用判定）
+lib/log.js           效果日志（0.2.5）：JSONL 追加、1 MB 轮转、写失败停写、小时计数种子、
+                     usage 命中率（与 UI 同分母）；所有入口永不抛
+lib/map.js           地图档注入渲染 + 分项统计（renderMapWithStats）+ 注入纪律块
+lib/tools.js         五个 ToolDefinition（execute 不动；日志包装在 index.js 的注册循环）
+lib/guard.js         write/edit 直写守卫（两条路径共用判定 + 共用日志包装）
 lib/context.js       cwd 提取（守卫与工具共用一份，避免两处漂移）
 scripts/pack.mjs     打包 tarball 并复制到 ~/.dsh/plugin-tarballs/（覆盖同名不同内容的包时警告）
-test/                146 个用例 + 同进程运行器（test/run.mjs）
+test/                164 个用例 + 同进程运行器（test/run.mjs）
 ```
 
 分层原则：**纯判定与 I/O 分离**。`lib/format.js` 完全不碰文件系统，`lib/config.js` 的 `normalizeConfig`

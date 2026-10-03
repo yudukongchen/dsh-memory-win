@@ -59,6 +59,16 @@ test("类型与范围非法一律抛，且消息里带键名与收到的值", ()
   assert.throws(() => normalizeConfig("x"), /config 必须是一个对象/);
 });
 
+test("logEnabled（0.2.5 效果日志开关）：默认 false，非 boolean 一律拒", () => {
+  assert.equal(CONFIG_DEFAULTS.logEnabled, false, "体检功能不该默认写盘");
+  assert.equal(normalizeConfig({}).logEnabled, false);
+  assert.equal(normalizeConfig({ logEnabled: true }).logEnabled, true);
+  assert.throws(() => normalizeConfig({ logEnabled: "yes" }), /logEnabled 必须是 true\/false/);
+  assert.throws(() => normalizeConfig({ logEnabled: 1 }), /logEnabled 必须是 true\/false/);
+  // 与 cleanupEnabled 走同一张 boolean 校验表（改一处两边同步变）
+  assert.throws(() => normalizeConfig({ cleanupEnabled: 1 }), /cleanupEnabled 必须是 true\/false/);
+});
+
 test("交叉约束：inlineTextMax 不能大于 factBodyMax（否则提醒永远不可能触发）", () => {
   assert.throws(
     () => normalizeConfig({ inlineTextMax: 3000, factBodyMax: 2000 }),

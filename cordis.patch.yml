@@ -18,6 +18,7 @@
 #       inlineThreshold: 12       # 每层超过多少条就切地图档（默认 8）
 #       cleanupDays: 7            # 失效条目多少天后可归档，最小 1（默认 3）
 #       cleanupDelaySeconds: 30   # 当天首次启动后延迟多少秒清理（默认 10）
+#       logEnabled: true          # 效果日志：逐事件写 <全局层上级>/logs/debug.jsonl（默认 false）
 #
 # 全部键、默认值、合法范围与交叉约束见 README 第 5 节「配置」。改完必须**重启**桌面版
 # （profile 的 HMR 只监听 patch 文件、不监听插件模块文件 —— 而配置是在插件模块里读的）。

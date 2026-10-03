@@ -30,8 +30,9 @@
 import { configNum, configValue, initConfig } from "./lib/config.js";
 import { cwdOf } from "./lib/context.js";
 import { runStartupCleanup } from "./lib/engine.js";
-import { denialText, directWriteDenial, preExecuteGuard } from "./lib/guard.js";
-import { SECTION_NAME, renderMap } from "./lib/map.js";
+import { denialText, directWriteDenialLogged, preExecuteGuard } from "./lib/guard.js";
+import { logConfigError, logInject, logInjectError, logToolCall, logUsage } from "./lib/log.js";
+import { SECTION_NAME, renderMapWithStats } from "./lib/map.js";
 import { allTools } from "./lib/tools.js";
 
 /** 插件名。 */
@@ -66,7 +67,14 @@ export function apply(ctx, config) {
   // ── 0. 配置层：先于一切读取 ──────────────────────────────────────────────
   // 必须在任何 `configNum()` 被调用之前完成（提示词段、工具描述、清理时机都读它）。
   // 抛错是刻意的：配错了要看得见，不要带着半截配置跑。
-  initConfig(config);
+  try {
+    initConfig(config);
+  } catch (error) {
+    // 原语义不变（照常拒绝启动），但若调用方明确写了 logEnabled: true，
+    // 先留一行 config_error 再抛 —— "配错了"正是体检日志要抓的信号之一。
+    logConfigError(error, config);
+    throw error;
+  }
 
   // ── 1. 地图注入 ──────────────────────────────────────────────────────────
   // text 传的是**函数**而非字符串：宿主每次装配时重新求值，所以记忆一改，
@@ -79,10 +87,16 @@ export function apply(ctx, config) {
         order: 1,
         text: (assembleContext) => {
           try {
-            return renderMap({ cwd: cwdOf(assembleContext) });
+            const cwd = cwdOf(assembleContext);
+            const rendered = renderMapWithStats({ cwd });
+            // 效果日志（0.2.5）：每轮一条，带分项字符数与档位（Q4 口径）。
+            // logInject 永不抛 —— 日志故障绝不能把提示词装配带崩。
+            logInject({ ...rendered.stats, cwd });
+            return rendered.text;
           } catch (error) {
             // 注入失败不能连带把提示词装配搞崩（那会让整个会话不可用），
             // 但仍然**留下痕迹**，而不是静默返回空串假装没有记忆。
+            logInjectError(error);
             return `## 长期记忆（地图档）\n<!-- dsh-memory-win: 渲染地图失败：${String(error?.message ?? error)} -->`;
           }
         },
@@ -102,7 +116,9 @@ export function apply(ctx, config) {
       }
       const disposers = [];
       for (const definition of allTools()) {
-        const dispose = tools.register(definition);
+        // 效果日志（0.2.5，Q8 定案 B）：注册循环里包装 execute ——
+        // 唯一同时看得到"入参 + 返回值"的单点；守卫那两个挂载点一行不动。
+        const dispose = tools.register(withEffectLog(definition));
         if (typeof dispose === "function") disposers.push(dispose);
       }
       return () => {
@@ -138,7 +154,7 @@ export function apply(ctx, config) {
       // `guard()` 是较新的接口：宿主没有它时**这条**分支跳过是合法的（下面有 waterfall 兜底），
       // 因此这里判空与上面不同 —— 那是"设计上可选"，不是"接线失败"。
       if (tools !== undefined && typeof tools.guard === "function") {
-        const dispose = tools.guard((execution) => directWriteDenial(execution));
+        const dispose = tools.guard((execution) => directWriteDenialLogged(execution));
         if (typeof dispose === "function") disposers.push(dispose);
       }
 
@@ -193,6 +209,52 @@ export function apply(ctx, config) {
     },
     "dsh-memory-win: capacity cleanup (first start of the day)",
   );
+
+  // ── 5. 效果日志：每轮 usage（KV 命中率）──────────────────────────────────
+  //
+  // 订阅**启动即挂、开关在回调里查**（Q15 定案 A）：配置改了要重启，
+  // 进程内开关恒定，"随开关增删监听器"的生命周期管理换不来任何行为差异。
+  // 数据通道与宿主 token-meter 同一条总线（实读 app.asar 确认）；
+  // 多会话的事件全记并带 session id（Q16），logUsage 内部先查开关且永不抛。
+  ctx.effect(
+    () => {
+      const off = ctx.on("session/event", (session, event) => {
+        logUsage(session, event);
+      });
+      return () => {
+        if (typeof off === "function") off();
+      };
+    },
+    "dsh-memory-win: effect log (session usage)",
+  );
+}
+
+/**
+ * 包装一个工具定义的 `execute`，正常返回后记一行效果日志（0.2.5）。
+ *
+ * 包装层的三条纪律：
+ * 1. **不改行为**：参数原样透传，返回值就是 `execute` 的那个对象（逐字节一致）；
+ * 2. **不吞错**：`execute` 抛错时原样上抛，且**不记事件** —— 被校验拒绝的调用
+ *    不进日志，也不计入小时计数（Q6 的"次数"口径是完成的调用）；
+ * 3. **日志失败不影响工具**：`logToolCall` 自身永不抛。
+ *
+ * @param {object} definition - 原始 ToolDefinition。
+ * @returns {object} 新定义（仅 `execute` 被包装）。
+ */
+function withEffectLog(definition) {
+  const execute = definition.execute;
+  return {
+    ...definition,
+    async execute(args, exec) {
+      const result = await execute(args, exec);
+      const session = exec?.agent?.session;
+      logToolCall(definition.name, args, result, {
+        cwd: cwdOf(exec),
+        session: typeof session?.id === "string" ? session.id : undefined,
+      });
+      return result;
+    },
+  };
 }
 
 /** 已经排过清理定时器的日历日（同一天不重复排）。 */
