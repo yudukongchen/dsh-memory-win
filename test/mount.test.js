@@ -583,6 +583,17 @@ test("memory_cleanup：cleanupEnabled=false 时 render 明确说明「没搬动�
   assert.match(text, /没有搬动任何东西/);
 });
 
+test("memory_cleanup：没有分片的层 render 说清「不创建目录、不写状态」（0.2.2 回归）", async () => {
+  const { ctx, record } = fakeCtx();
+  apply(ctx, { cleanupDelaySeconds: 0 });
+  const cleanup = record.tools.find((t) => t.name === "memory_cleanup");
+  // projectCwd 还没写过任何记忆 ⇒ 项目层是 no-shards
+  const value = await cleanup.execute({ force: true }, { agent: { session: { header: { cwd: projectCwd } } } });
+  const text = cleanup.output.render({}, value)[0].text;
+  assert.match(text, /还没有任何分片，跳过/);
+  assert.match(text, /不创建目录、也不写状态文件/);
+});
+
 test("注入纪律块写明归档规则（含失效天数与归档目录名）", () => {
   const { ctx, record } = fakeCtx();
   apply(ctx);

@@ -252,10 +252,38 @@ test("已知工作区：从 storages/workspace.json 读出别的仓库并清理�
   );
 
   // cwd 给一个**没有记忆的**新目录，确保被清的是 workspace.json 里那个仓库
-  const result = await runStartupCleanup({ cwd: join(sandbox, "unrelated") });
+  const unrelated = join(sandbox, "unrelated");
+  const result = await runStartupCleanup({ cwd: unrelated });
   const cleaned = result.layers.filter((l) => l.target === "project");
   assert.equal(cleaned.some((l) => l.removedShards.includes("o")), true, "别的仓库的项目层也被清理了");
   assert.equal(existsSync(join(otherRoot, PROJECT_DIR_NAME, "o.md")), false);
+
+  // 回归（0.2.1 宿主内实测踩到）：**没有任何分片的层必须什么都不写** ——
+  // 旧实现会给每个已知工作区写一份 `.state.json`，于是插件在用户从没用过它的仓库里
+  // 凭空建出一个隐藏目录（实测：某个从未写过记忆的仓库的 git status 多了一条 `?? .agent-memory/`）。
+  assert.equal(existsSync(join(unrelated, PROJECT_DIR_NAME)), false, "没有记忆的目录不该被创建");
+  const skipped = result.layers.filter((l) => l.skipped === "no-shards");
+  assert.equal(skipped.length >= 1, true, "没有分片的层应报 no-shards（而非写状态）");
+});
+
+test("没有任何分片的层：不创建目录、不写状态文件，且下次启动仍会重新检查", async () => {
+  const emptyRepo = join(sandbox, "empty-repo");
+
+  const first = await runStartupCleanup({ cwd: emptyRepo });
+  const projectLayer = first.layers.find((l) => l.target === "project");
+  assert.equal(projectLayer.skipped, "no-shards");
+  assert.equal(first.ran, false, "整层都没做任何事 ⇒ 不算跑过");
+  assert.equal(existsSync(join(emptyRepo, PROJECT_DIR_NAME)), false, "目录不该被创建");
+
+  // 即便 force，也仍然不写（force 是"忽略当天标记"，不是"允许建目录"）
+  await runStartupCleanup({ cwd: emptyRepo, force: true });
+  assert.equal(existsSync(join(emptyRepo, PROJECT_DIR_NAME)), false);
+
+  // 之后真有记忆了，就正常参与清理并写状态
+  await appendMemory({ target: "project", cwd: emptyRepo, shard: "later", fact: "后来才有的一条" });
+  const second = await runStartupCleanup({ cwd: emptyRepo });
+  assert.equal(second.layers.find((l) => l.target === "project").skipped, undefined);
+  assert.equal(existsSync(join(emptyRepo, PROJECT_DIR_NAME, ".state.json")), true, "有分片之后才写状态");
 });
 
 test("workspace.json 读不懂时降级：全局层照常清理，不抛错", async () => {
