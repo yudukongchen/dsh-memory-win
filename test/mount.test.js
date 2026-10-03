@@ -475,3 +475,44 @@ test("宿主没有 tools 服务时**显式失败**，而不是静默少掉全部
   const { ctx } = fakeCtx({ withTools: false });
   assert.throws(() => apply(ctx), /tools 服务不可用/);
 });
+
+// ══════════════════════════════════════════════════════════════════════════════
+// P10：内联显示上限的提醒必须**真的渲染进工具输出**
+//
+// engine 层回 `warning` 只是第一步；模型看到的是 render 之后的文本。
+// 少了这一步，提醒就永远到不了写记忆的那一方 —— 等于没做。
+// ══════════════════════════════════════════════════════════════════════════════
+
+test("P10：memory_add 的超限提醒出现在 render 输出里（带 ⚠️）", async () => {
+  const { ctx, record } = fakeCtx();
+  apply(ctx);
+  const add = record.tools.find((t) => t.name === "memory_add");
+  const exec = { agent: { session: { header: { cwd: projectCwd } } } };
+
+  const value = await add.execute({ fact: "戊".repeat(200), shard: "long", keywords: "长" }, exec);
+  assert.equal(value.ok, true);
+
+  const blocks = add.output.render({}, value);
+  assert.match(blocks[0].text, /⚠️/, "提醒必须以可见形式渲染");
+  assert.match(blocks[0].text, /160/);
+  assert.match(blocks[0].text, /结论 \+ 指针/);
+});
+
+test("P10：memory_correct 的新结论超限时，render 输出里同样有 ⚠️", async () => {
+  const { ctx, record } = fakeCtx();
+  apply(ctx);
+  const byName = Object.fromEntries(record.tools.map((t) => [t.name, t]));
+  const exec = { agent: { session: { header: { cwd: projectCwd } } } };
+
+  const added = await byName.memory_add.execute({ fact: "要被修正的结论", shard: "fix", keywords: "修正" }, exec);
+  assert.equal(added.warning, undefined, "前提：这条既不超长、也给了 keywords，不应有提醒");
+
+  const search = await byName.memory_search.execute({ query: "要被修正的结论" }, exec);
+  const corrected = await byName.memory_correct.execute(
+    { id: search.hits[0].id, reason: "defect", replacement: "己".repeat(200) },
+    exec,
+  );
+  const blocks = byName.memory_correct.output.render({}, corrected);
+  assert.match(blocks[0].text, /⚠️/);
+  assert.match(blocks[0].text, /160/);
+});

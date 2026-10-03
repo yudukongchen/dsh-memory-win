@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 
 import { INLINE_MAX_ENTRIES, appendMemory, correctMemory, listLayer, searchMemory, writeChainSize } from "../lib/engine.js";
+import { INLINE_TEXT_MAX } from "../lib/format.js";
 import { PROJECT_DIR_NAME, globalRoot, isAbsoluteAny } from "../lib/paths.js";
 import { renderMap } from "../lib/map.js";
 
@@ -553,4 +554,65 @@ test("P2b：只有关键词头、0 条目的文件仍算新建，可补 keywords
   assert.equal(r.ok, true);
   assert.equal(r.warning, undefined);
   assert.match(readFileSync(join(globalRoot(), "empty.md"), "utf8"), /<!-- empty ·  补上 主题 -->/);
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// P10：内联显示上限（160 字符）的**写入侧提醒**
+//
+// 背景：写入上限是 2000、显示上限是 160，而 161~2000 这个区间原本是
+// "合法写入、静默丢尾" —— 实测有 4 条 200+ 字符的记忆尾部长期没进过上下文。
+// 这些用例把"静默"钉死为"必须给出可见提醒"。
+// ══════════════════════════════════════════════════════════════════════════════
+
+test("P10：正文超过 160 字符仍写入成功，但必须回 warning（不阻断）", async () => {
+  const long = "甲".repeat(INLINE_TEXT_MAX + 1);
+  const r = await appendMemory({ target: "global", shard: "long", fact: long, keywords: "长条目" });
+
+  assert.equal(r.ok, true, "超限只是显示问题，不能拒绝写入");
+  assert.equal(typeof r.warning, "string", "必须给出可见提醒");
+  assert.match(r.warning, /160/);
+  assert.match(r.warning, /结论 \+ 指针/, "提醒要给出可执行的正解");
+  assert.match(r.warning, new RegExp(`${INLINE_TEXT_MAX + 1}`), "提醒要说清实际长度");
+  assert.equal(readFileSync(join(globalRoot(), "long.md"), "utf8").includes(long), true, "正文必须完整落盘");
+});
+
+test("P10：正好 160 字符不提醒（边界不多报）", async () => {
+  const exact = "乙".repeat(INLINE_TEXT_MAX);
+  const r = await appendMemory({ target: "global", shard: "exact", fact: exact, keywords: "边界" });
+  assert.equal(r.ok, true);
+  assert.equal(r.warning, undefined, "等于上限时能被完整显示，不应提醒");
+});
+
+test("P10：长度提醒与「新建未给 keywords」提醒会合并，互不覆盖", async () => {
+  const r = await appendMemory({ target: "global", shard: "nokw", fact: "丙".repeat(INLINE_TEXT_MAX + 5) });
+  assert.equal(typeof r.warning, "string");
+  assert.match(r.warning, /未提供 keywords/, "关键词提醒不能被长度提醒挤掉");
+  assert.match(r.warning, /160/, "长度提醒也不能被关键词提醒挤掉");
+});
+
+test("P10：memory_correct 的新结论超限时同样提醒；短结论不提醒", async () => {
+  await appendMemory({ target: "global", shard: "fixme", fact: "旧结论", date: "2026-01-01", keywords: "修正" });
+  const found = searchMemory("旧结论", {});
+  const id = found.hits[0].id;
+
+  const long = await correctMemory({
+    target: "global",
+    shard: "fixme",
+    id,
+    reason: "overturned",
+    replacement: "丁".repeat(INLINE_TEXT_MAX + 1),
+  });
+  assert.equal(long.ok, true);
+  assert.match(long.warning, /160/);
+
+  // 再修正一次，这次是短结论 → 不应提醒
+  const short = await correctMemory({
+    target: "global",
+    shard: "fixme",
+    id: long.newId,
+    reason: "correction",
+    replacement: "短结论",
+  });
+  assert.equal(short.ok, true);
+  assert.equal(short.warning, undefined);
 });
