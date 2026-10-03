@@ -123,13 +123,13 @@ test("apply 注册一个提示词段，name 与 SECTION_NAME 一致", () => {
   assert.equal(Number.isFinite(record.sections[0].order), true, "order 必须有限");
 });
 
-test("注册的四个工具名与 schema 形状正确", () => {
+test("注册的五个工具名与 schema 形状正确", () => {
   const { ctx, record } = fakeCtx();
   apply(ctx);
 
   assert.deepEqual(
     record.tools.map((t) => t.name).sort(),
-    ["memory_add", "memory_correct", "memory_list", "memory_search"],
+    ["memory_add", "memory_cleanup", "memory_correct", "memory_list", "memory_search"],
   );
 
   for (const tool of record.tools) {
@@ -515,4 +515,81 @@ test("P10：memory_correct 的新结论超限时，render 输出里同样有 ⚠
   const blocks = byName.memory_correct.output.render({}, corrected);
   assert.match(blocks[0].text, /⚠️/);
   assert.match(blocks[0].text, /160/);
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 0.2.0：配置层接线 + 容量策略工具
+//
+// 配置是**在 apply 里读进来的**（`apply(ctx, config)`），不是模块加载期快照 ——
+// 所以"配错了拒绝启动"与"配置真的改动了工具描述"都要在这一层验证。
+// ══════════════════════════════════════════════════════════════════════════════
+
+test("apply(ctx, config)：非法配置**拒绝启动**，而不是带着半截配置跑", () => {
+  const { ctx } = fakeCtx();
+  assert.throws(() => apply(ctx, { inlineTextMax: 3000, factBodyMax: 2000 }), /不能大于 factBodyMax/);
+  assert.throws(() => apply(ctx, { cleanupDays: 0 }), /超出允许范围/);
+  // 合法配置不抛
+  const ok = fakeCtx();
+  apply(ok.ctx, { inlineTextMax: 200, cleanupDelaySeconds: 0 });
+  assert.equal(ok.record.tools.length, 5);
+});
+
+test("配置改动真的到达工具描述（不是只存起来）", () => {
+  const { ctx, record } = fakeCtx();
+  apply(ctx, { inlineTextMax: 111, factBodyMax: 222, inlineThreshold: 3, keywordsMaxChars: 44 });
+  const add = record.tools.find((t) => t.name === "memory_add");
+  assert.match(add.parameters.properties.fact.description, /Hard limit 222/);
+  assert.match(add.parameters.properties.fact.description, /under 111/);
+  assert.match(add.parameters.properties.fact.description, /up to 3 entries/);
+  assert.match(add.parameters.properties.keywords.description, /under 44 characters/);
+});
+
+test("memory_cleanup：schema / render / execute 三处一致", async () => {
+  const { ctx, record } = fakeCtx();
+  apply(ctx, { cleanupDelaySeconds: 0 });
+  const cleanup = record.tools.find((t) => t.name === "memory_cleanup");
+  assert.notEqual(cleanup, undefined);
+  assert.equal(typeof cleanup.output.render, "function");
+
+  const exec = { agent: { session: { header: { cwd: projectCwd } } } };
+  const added = await record.tools.find((t) => t.name === "memory_add").execute(
+    { fact: "一条会被撤回的结论", shard: "cl", keywords: "清理" },
+    exec,
+  );
+  assert.equal(added.ok, true);
+  const found = await record.tools.find((t) => t.name === "memory_search").execute({ query: "会被撤回" }, exec);
+  await record.tools
+    .find((t) => t.name === "memory_correct")
+    .execute({ id: found.hits[0].id, reason: "retract", target: "project" }, exec);
+
+  // 默认 force=true：刚撤回的也能立刻清（宽限期按 cleanupDays 判定，这里给 0 天窗口
+  // 不合法——cleanupDays 最小 1，所以这里断言的是"跑得动且渲染得出来"）。
+  const value = await cleanup.execute({ target: "project" }, exec);
+  const text = cleanup.output.render({}, value)[0].text;
+  assert.match(text, /容量策略/);
+  assert.match(text, /失效满 \d+ 天起可归档/);
+  assert.match(text, /项目层/);
+  assert.match(text, /归档件是\*\*原样保留的失效条目\*\*/);
+});
+
+test("memory_cleanup：cleanupEnabled=false 时 render 明确说明「没搬动任何东西」", async () => {
+  const { ctx, record } = fakeCtx();
+  apply(ctx, { cleanupEnabled: false });
+  const cleanup = record.tools.find((t) => t.name === "memory_cleanup");
+  const value = await cleanup.execute({}, { agent: { session: { header: { cwd: projectCwd } } } });
+  assert.equal(value.reason, "disabled");
+  const text = cleanup.output.render({}, value)[0].text;
+  assert.match(text, /归档已关闭/);
+  assert.match(text, /没有搬动任何东西/);
+});
+
+test("注入纪律块写明归档规则（含失效天数与归档目录名）", () => {
+  const { ctx, record } = fakeCtx();
+  apply(ctx);
+  const text = record.sections[0].text({ agent: { session: { header: { cwd: projectCwd } } } });
+  assert.match(text, /### 取回 · 写入 · 修正 · 归档/);
+  assert.match(text, /失效满 3 天/);
+  assert.match(text, /archive\//);
+  assert.match(text, /memory_cleanup/);
+  assert.match(text, /活条目永远不会被搬走/);
 });

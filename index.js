@@ -15,12 +15,21 @@
  * - 不调用任何模型做巩固/反思 → 零额外成本，也避免弱模型把噪音写进长期记忆；
  * - 不 spawn 任何外部进程、不拼 shell 命令 → 这正是四个参考插件在 Windows 上
  *   最集中的故障源（`/bin/zsh` 抛穿、`sh -c` 静默吞错、`process.kill(-pid)` 失效）；
- * - 不做浏览器半身 / 设置面板 → demo 阶段刻意最小化（详见 README 的限制清单）。
+ * - 不做浏览器半身 / 设置面板 → 配置只走 profile patch 的 `config:` 段（见 lib/config.js）。
+ *
+ * 0.2.0 的两项变化：
+ * - **配置层**（`lib/config.js`）：`inlineTextMax` / `factBodyMax` / `inlineThreshold` /
+ *   `keywordsMaxChars` / `cleanupDays` / `cleanupDelaySeconds` / 凭据模式表等都从
+ *   "硬编码常量"变成 config 键，解析顺序与交叉校验都在那一个模块里；
+ * - **容量策略**（`lib/engine.js` 的 `runCleanup` + `lib/state.js`）：当天首次启动延迟
+ *   若干秒，把**已失效条目**与**空分片**搬进每层的归档目录。活条目永不搬走。
  *
  * @module dsh-memory-win
  */
 
+import { configNum, configValue, initConfig } from "./lib/config.js";
 import { cwdOf } from "./lib/context.js";
+import { runStartupCleanup } from "./lib/engine.js";
 import { denialText, directWriteDenial, preExecuteGuard } from "./lib/guard.js";
 import { SECTION_NAME, renderMap } from "./lib/map.js";
 import { allTools } from "./lib/tools.js";
@@ -50,8 +59,15 @@ export const inject = ["systemPrompt", "tools"];
  * 挂载。
  *
  * @param {object} ctx - cordis 插件上下文。
+ * @param {object} [config] - profile patch 的 `config:` 段（宿主按 `apply(ctx, config)` 传入）。
+ *   非法配置会在这里**抛错、拒绝启动** —— 见 lib/config.js 的解析顺序与交叉校验。
  */
-export function apply(ctx) {
+export function apply(ctx, config) {
+  // ── 0. 配置层：先于一切读取 ──────────────────────────────────────────────
+  // 必须在任何 `configNum()` 被调用之前完成（提示词段、工具描述、清理时机都读它）。
+  // 抛错是刻意的：配错了要看得见，不要带着半截配置跑。
+  initConfig(config);
+
   // ── 1. 地图注入 ──────────────────────────────────────────────────────────
   // text 传的是**函数**而非字符串：宿主每次装配时重新求值，所以记忆一改，
   // 下一轮注入立刻反映 —— 不存在"读到缓存的旧地图"。
@@ -141,4 +157,54 @@ export function apply(ctx) {
     },
     "dsh-memory-win: memory write guard",
   );
+
+  // ── 4. 容量策略：**当天首次启动 + 延迟 N 秒**触发一次 ───────────────────────
+  //
+  // 时机是用户明确指定的（T1 补充第 2 条）：软件当天首次启动后约 10 秒跑一次，
+  // 并且**当天不重复** —— 去重依据写在每层状态文件的 `lastCleanup` 里，
+  // 而不是内存标记，所以当天重启多少次都不会重复清理，跨天自动恢复。
+  //
+  // 延迟的另一个理由：启动瞬间宿主正在加载插件、装配提示词，这时去读写记忆目录
+  // 既慢又容易和在途写入抢文件。
+  //
+  // 只做"搬走已经失效的条目与空分片"，活条目永不搬走（详见 lib/engine.js 的
+  // `cleanupLayer`）。清理失败只记日志，绝不影响插件其余功能。
+  ctx.effect(
+    () => {
+      if (configValue("cleanupEnabled") !== true) return () => {};
+      const day = localDay();
+      // 同一天内重复 apply（例如多个工作区各装配一次）只排一次定时器。
+      if (lastScheduledDay === day) return () => {};
+      lastScheduledDay = day;
+      const delayMs = Math.max(0, configNum("cleanupDelaySeconds")) * 1000;
+      let cancelled = false;
+      const timer = setTimeout(() => {
+        if (cancelled) return;
+        runStartupCleanup({ ctx }).catch(() => {
+          /* 清理是后台增强：失败不该冒泡成插件错误 */
+        });
+      }, delayMs);
+      // 不要让这个定时器把进程钉住（桌面版退出时不必等它）。
+      if (typeof timer.unref === "function") timer.unref();
+      return () => {
+        cancelled = true;
+        clearTimeout(timer);
+      };
+    },
+    "dsh-memory-win: capacity cleanup (first start of the day)",
+  );
+}
+
+/** 已经排过清理定时器的日历日（同一天不重复排）。 */
+let lastScheduledDay = "";
+
+/**
+ * 本地日历日的 `YYYY-MM-DD`（只在 `index.js` 用一次，故不额外引模块）。
+ *
+ * @returns {string} 例：`2026-10-05`。
+ */
+function localDay() {
+  const now = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
 }

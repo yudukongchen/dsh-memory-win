@@ -1,8 +1,26 @@
 # dsh-memory-win bundle patch.
 #
 # 一行 insert 即挂载 Host 半身。`name` 必须是 package.json 里的完整包名。
-# 本插件只有 Host 半身（注入提示词段 + 注册三个原生工具），没有浏览器半身，
+# 本插件只有 Host 半身（注入提示词段 + 注册五个原生工具），没有浏览器半身，
 # 所以 package.json 里不声明 `dsh.client`，设置页暂时也不需要。
+#
+# ## 配置（0.2.0 起）
+#
+# 下面 insert 的 `config: {}` 是**默认档**。要改行为，在 profile 的
+# `cordis.patch.yml` 里加一条**同 id** 的 patch —— 宿主对非 insert patch 做的是
+# **整段替换**（`applyEntryPatches`: `target[key] = value`），未写的键由插件自己的
+# `lib/config.js` 补默认值，所以**只写你要改的那几个键**即可：
+#
+#   - id: dsh-memory-win
+#     name: 'dsh-memory-win'
+#     config:
+#       inlineTextMax: 200        # 内联档每条正文的显示上限（默认 160）
+#       inlineThreshold: 12       # 每层超过多少条就切地图档（默认 8）
+#       cleanupDays: 7            # 失效条目多少天后可归档，最小 1（默认 3）
+#       cleanupDelaySeconds: 30   # 当天首次启动后延迟多少秒清理（默认 10）
+#
+# 全部键、默认值、合法范围与交叉约束见 README 第 5 节「配置」。改完必须**重启**桌面版
+# （profile 的 HMR 只监听 patch 文件、不监听插件模块文件 —— 而配置是在插件模块里读的）。
 - insert:
     - id: dsh-memory-win
       name: 'dsh-memory-win'
