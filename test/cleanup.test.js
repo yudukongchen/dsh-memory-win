@@ -325,15 +325,16 @@ test("命中记录按**日**粒度：同一天重复取回不产生第二次写�
 // 判定函数上（`archivableLines`），不是在集成测试里靠日期凑。
 // ══════════════════════════════════════════════════════════════════════════════
 
-test("archivableLines 边界：正好等于截止日**不**归档，早一天才归档", () => {
+test("archivableLines 边界：**正好满 N 天就归档**，少一天不动（0.2.4 起与文档口径一致）", () => {
   const day = today();
   const cutoff = shiftDays(day, -3); // cleanupDays = 3
   const entries = [
-    { line: 2, date: cutoff, id: "eq" }, // 正好 3 天前 ⇒ 不动
-    { line: 4, date: shiftDays(day, -4), id: "old" }, // 4 天前 ⇒ 动
-    { line: 6, date: shiftDays(day, -1), id: "new" }, // 1 天前 ⇒ 不动
+    { line: 2, date: cutoff, id: "exactly" }, // 正好满 3 天 ⇒ 归档（含边界）
+    { line: 4, date: shiftDays(day, -4), id: "old" }, // 4 天 ⇒ 归档
+    { line: 6, date: shiftDays(day, -2), id: "fresh" }, // 只失效 2 天 ⇒ 不动
+    { line: 8, date: day, id: "today" }, // 今天刚取代 ⇒ 不动
   ];
-  assert.deepEqual(archivableLines({ superseded: entries, days: 3, day }), [4]);
+  assert.deepEqual(archivableLines({ superseded: entries, days: 3, day }), [2, 4]);
 });
 
 test("archivableLines：宽限期内被取回过的要减档；取回记录也过期时照常归档", () => {
@@ -342,10 +343,12 @@ test("archivableLines：宽限期内被取回过的要减档；取回记录也�
   const entries = [
     { line: 2, date: old, id: "seen" },
     { line: 3, date: old, id: "stale" },
+    { line: 4, date: old, id: "edge" },
   ];
   const access = new Map([
     ["seen", day], // 今天刚被取回 ⇒ 减档
     ["stale", shiftDays(day, -9)], // 取回记录本身也过了宽限期 ⇒ 不减档
+    ["edge", shiftDays(day, -3)], // 取回日正好是宽限期边界 ⇒ 也算"最近取回过" ⇒ 减档
   ]);
   assert.deepEqual(archivableLines({ superseded: entries, days: 3, day, access }), [3]);
 });
