@@ -47,7 +47,7 @@ DSH 桌面版（Windows 优先）的长期记忆插件 —— **纯本地、零�
 ## 坑
 
 - [2026-09-28] pwsh 里读文件用 Get-Content -Raw；不要用 cat
-- [2026-10-01] git bash 下路径要写成 /e/Game 而不是 E:/Game
+- [2026-10-01] git bash 下路径要写成 /c/项目 而不是 C:/项目
 ```
 
 条目格式是唯一硬约定：`- [YYYY-MM-DD] 事实`。日期经 **UTC 回读校验**（`new Date("2026-13-45")` 会进位到 2027-02-14 而不是 Invalid Date，只判 `NaN` 会把这类错误放行）。
@@ -306,7 +306,7 @@ $ node test/run.mjs
 
 | 验证项 | 结果 |
 |---|---|
-| 全局层根目录解析 | `C:\Users\king\.dsh\memory-win\global` —— 本机 **`HOME` 未设**，仍解析正确（证明"调用时求值 + `homedir()` 兜底"两条都生效） |
+| 全局层根目录解析 | `%USERPROFILE%\.dsh\memory-win\global` —— 本机 **`HOME` 未设**，仍解析正确（证明"调用时求值 + `homedir()` 兜底"两条都生效） |
 | 地图即时性 | `memory_add` 之后**同一轮**提示词里的地图就从"0 片 / 0 条"变为"1 片 / 2 条"，且由地图档切到小层内联档 |
 | 检索行号准确性 | `memory_search` 返回 `line=3` / `line=4`；实读文件确认条目**正好**在第 3、4 行（第 1 行关键词头，第 2 行空行） |
 | **写入守卫（两条路径）** | 对全局层与**正确的**项目层路径直接调用原生 `write` → 均被拒；写进子目录 `dsh-memory-win\.agent-memory\` **不会**被拦，那是正确行为（见第 3 节限制 3） |
@@ -322,7 +322,7 @@ $ node test/run.mjs
 
 ```
 profile:      ~/.dsh/profiles/desktop
-dependencies: dsh-memory-win → file:C:/Users/king/.dsh/plugin-tarballs/dsh-memory-win-0.1.4.tgz
+dependencies: dsh-memory-win → file:%USERPROFILE%/.dsh/plugin-tarballs/dsh-memory-win-0.1.4.tgz
 bundles:      dsh.profile.bundles 里含 dsh-memory-win（当前**启用**，即开关处于打开状态）
 产物比对:     node_modules/dsh-memory-win/ 的 index.js / package.json / cordis.patch.yml
               / lib/*.js —— 10 个运行期文件与仓库**逐字节一致**（SHA-256 比对）
