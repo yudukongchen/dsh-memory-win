@@ -49,10 +49,14 @@ const cache = join(repo, ".npm-cache");
 const args = ["pack", "--pack-destination", dist, "--loglevel", "notice"];
 if (existsSync(cache)) rmSync(cache, { recursive: true, force: true });
 
+// Node 的安全修复（CVE-2024-27982 系列）之后，Windows 上不经 shell 直接
+// spawn `.cmd` 会报 EINVAL —— 本机实测（node 22）。所以加 shell:true，
+// 由 Node 负责 cmd 的引号规则；参数全部来自本脚本、无外部输入。
 execFileSync(process.platform === "win32" ? "npm.cmd" : "npm", args, {
   cwd: repo,
   stdio: "inherit",
   env: { ...process.env, npm_config_cache: cache },
+  shell: process.platform === "win32",
 });
 
 const built = join(dist, fileName);

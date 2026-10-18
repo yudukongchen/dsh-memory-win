@@ -78,6 +78,7 @@ function fakeCtx(options = {}) {
     : undefined;
 
   const ctx = {
+    inject() { return { dispose() {} }; },
     effect(factory) {
       const dispose = factory();
       return typeof dispose === "function" ? dispose : () => {};

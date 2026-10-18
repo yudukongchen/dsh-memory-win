@@ -1,8 +1,9 @@
 # dsh-memory-win bundle patch.
 #
 # 一行 insert 即挂载 Host 半身。`name` 必须是 package.json 里的完整包名。
-# 本插件只有 Host 半身（注入提示词段 + 注册五个原生工具），没有浏览器半身，
-# 所以 package.json 里不声明 `dsh.client`，设置页暂时也不需要。
+# Host 半身提供：注入提示词段、五个原生工具、只读的效果日志与记忆视图路由；
+# 浏览器半身（lib/client.js，0.3.0 起）由 package.json 的 `dsh.client` 声明，
+# 宿主按约定加载 "./client" 导出，不需要在 patch 里另行登记。
 #
 # ## 配置（0.2.0 起）
 #

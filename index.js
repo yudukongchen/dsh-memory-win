@@ -15,7 +15,8 @@
  * - 不调用任何模型做巩固/反思 → 零额外成本，也避免弱模型把噪音写进长期记忆；
  * - 不 spawn 任何外部进程、不拼 shell 命令 → 这正是四个参考插件在 Windows 上
  *   最集中的故障源（`/bin/zsh` 抛穿、`sh -c` 静默吞错、`process.kill(-pid)` 失效）；
- * - 不做浏览器半身 / 设置面板 → 配置只走 profile patch 的 `config:` 段（见 lib/config.js）。
+ * - 浏览器半身（0.3.0 起）**只做只读浏览**：设置页「记忆视图」列层与分片，
+ *   不提供任何修改/删除路径（见 lib/view.js 与 lib/client.js）。
  *
  * 0.2.0 的两项变化：
  * - **配置层**（`lib/config.js`）：`inlineTextMax` / `factBodyMax` / `inlineThreshold` /
@@ -34,6 +35,7 @@ import { denialText, directWriteDenialLogged, preExecuteGuard } from "./lib/guar
 import { logConfigError, logInject, logInjectError, logToolCall, logUsage } from "./lib/log.js";
 import { SECTION_NAME, renderMapWithStats } from "./lib/map.js";
 import { allTools } from "./lib/tools.js";
+import { registerViewRoutes } from "./lib/view.js";
 
 /** 插件名。 */
 export const name = "dsh-memory-win";
@@ -210,7 +212,16 @@ export function apply(ctx, config) {
     "dsh-memory-win: capacity cleanup (first start of the day)",
   );
 
-  // ── 5. 效果日志：每轮 usage（KV 命中率）──────────────────────────────────
+  // ── 5. 记忆视图的宿主路由（0.3.0，只读）───────────────────────────────────
+  //
+  // The Web UI is optional, but Cordis service access still requires inject.
+  // A child scope waits for webServer and owns route teardown/re-registration.
+  // Keeping the dependency out of the parent preserves browserless tool usage.
+  ctx.inject(["webServer"], (viewCtx) => {
+    registerViewRoutes(viewCtx);
+  });
+
+  // ── 6. 效果日志：每轮 usage（KV 命中率）──────────────────────────────────
   //
   // 订阅**启动即挂、开关在回调里查**（Q15 定案 A）：配置改了要重启，
   // 进程内开关恒定，"随开关增删监听器"的生命周期管理换不来任何行为差异。

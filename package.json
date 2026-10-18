@@ -1,17 +1,38 @@
 {
   "name": "dsh-memory-win",
-  "version": "0.2.6",
+  "version": "0.3.2",
   "private": true,
   "type": "module",
-  "description": "Windows-first long-term memory for the DSH desktop app: plain markdown shards with a per-step map injection (path / entry count / latest date / keywords) and on-demand retrieval through the memory_search tool. Zero shell, zero external process, zero dependency — roots resolve at call time from DSH_HOME/homedir so the global layer cannot silently vanish on Windows, memory is split into a global layer plus a per-project layer (inside the repo) plus named shards under each, behaviour thresholds come from a single config layer, and a daily capacity pass physically archives superseded entries and empty shards.",
+  "description": "Windows-first long-term memory for the DSH desktop app: plain markdown shards with a per-step map injection (path / entry count / latest date / keywords) and on-demand retrieval through the memory_search tool. Zero shell, zero external process, zero dependency — roots resolve at call time from DSH_HOME/homedir so the global layer cannot silently vanish on Windows, memory is split into a global layer plus a per-project layer (inside the repo) plus named shards under each, behaviour thresholds come from a single config layer, a daily capacity pass physically archives superseded entries and empty shards, and since 0.3.0 a read-only Memory View settings page browses layers and shards without ever writing.",
   "main": "./index.js",
   "exports": {
     ".": "./index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-client-locale": "^0.2.0-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.2.0-rc.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-client-locale": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-slots": {
+      "optional": true
     }
   },
   "files": [
@@ -33,7 +54,10 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node test/run.mjs",
+    "test": "node test/run.mjs && node tools/view-lifecycle.mjs && node tools/client-smoke.mjs && node tools/compat-check.mjs",
+    "test:unit": "node test/run.mjs",
+    "test:client": "node tools/client-smoke.mjs",
+    "test:compat": "node tools/compat-check.mjs",
     "pack:plugin": "node scripts/pack.mjs"
   },
   "license": "MIT"
