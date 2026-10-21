@@ -30,7 +30,7 @@
 
 import { configNum, configValue, initConfig } from "./lib/config.js";
 import { cwdOf } from "./lib/context.js";
-import { registerCompactGuard } from "./lib/compact-guard.js";
+import { registerCompactBackup, registerCompactConvergence } from "./lib/compact-guard.js";
 import { runStartupCleanup } from "./lib/engine.js";
 import { denialText, directWriteDenialLogged, preExecuteGuard } from "./lib/guard.js";
 import { logConfigError, logInject, logInjectError, logToolCall, logUsage } from "./lib/log.js";
@@ -229,14 +229,19 @@ export function apply(ctx, config) {
   //   · `compaction/start` → 备份会话日志（明细见 lib/session-backup.js）；
   //   · `compaction/end`   → 量一次消息历史，超标就补一次收敛（lib/compact-guard.js）。
   //
-  // 五个依赖都是 `dsh-base` 的常驻服务，所以用子作用域声明式等待：极简 profile
-  // 缺任何一个时本模块整体不挂（而不是挂一半、静默失效）。
-  ctx.inject(
-    ["sessions", "compaction", "tokenMeter", "sessionProjections", "sessionTitle"],
-    (guardCtx) => {
-      registerCompactGuard(guardCtx);
-    },
-  );
+  // ⚠️ 两半边**分开注入**（0.4.2 修，真实缺陷）：`compaction` 在 web profile 里
+  // 只在**每个 agent preset 的隔离作用域**内存在（宿主平面那条被 dsh-web-app
+  // `disabled: true`），而本插件挂在根作用域。原来把五个服务写在一个 inject 里 ⇒
+  // 永远等不到 `compaction` ⇒ **连只需要 `sessions` 的备份半边也一起静默死掉**
+  //（实测：真实压缩发生过三次，`session-backups/` 连目录都没建）。
+  // 现在：备份只要 `sessions`；收敛独享 `compaction`，拿不到就只少这一个半边。
+  ctx.inject(["sessions"], (backupCtx) => {
+    registerCompactBackup(backupCtx);
+  });
+
+  ctx.inject(["compaction"], (convergeCtx) => {
+    registerCompactConvergence(convergeCtx);
+  });
 
   // ── 6. 效果日志：每轮 usage（KV 命中率）──────────────────────────────────
   //

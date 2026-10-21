@@ -2,7 +2,7 @@
 
 DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖、不走 shell、不调用模型。
 
-- 版本 **0.4.0**，单测 **204 例**（`node test/run.mjs`）+ 真实 Cordis 生命周期回归 + 客户端冒烟 33 项 + 宿主契约检查 6 项（`npm test` 串跑）。
+- 版本 **0.4.2**，单测 **208 例**（`node test/run.mjs`）+ 真实 Cordis 生命周期回归 + 客户端冒烟 33 项 + 宿主契约检查 6 项（`npm test` 串跑）。
 - 已装入本机 desktop profile，在真实宿主里跑过 14 轮实测。
 - 实现刻意最小化，但核心机制与安全边界完整、有测试覆盖，仍然算 **demo**。
 
@@ -47,23 +47,58 @@ DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖�
 
 两条配套事实（都实测过，写在这里免得再推一遍）：
 
-- **阈值不在本插件里**：`75%`/`750k` 由宿主那条 `compaction-basic` 的 `thresholdRatio`
-  决定。要改成 75%，在 profile 的 `cordis.patch.yml` 里加：
+- **阈值不在本插件里**：`80%`/`800k` 由宿主那条 `compaction-basic` 的 `thresholdRatio`
+  决定。**怎么改，取决于那条 compaction-basic 在哪个作用域生效**（0.4.2 修正，见下）：
 
-  ```yaml
-  - id: compaction-basic
-    name: '@deepseek-ai/dsh-compaction-basic'
-    config:
-      thresholdRatio: 0.75      # 1M 窗口 → 750k（min(750k, W−O−65536)）
-      retainTokens: 8000        # 逐字保留的近期尾部
-      maxTokens: 8000           # 摘要输出上限（默认 65536）
-  ```
+  | profile | 生效实例在哪 | 怎么改 |
+  |---|---|---|
+  | web / desktop（`dsh-web-app`） | **每个 agent preset 内部**（`isolate: {compaction: true}`）；宿主平面那条被 `disabled: true` | 覆写 preset 的 `config.plugins`（跟网页版预设编辑器保存出来的形状一致）：把 `thresholdRatio: 0.75` 加到 preset 里那条 `compaction-basic` 上 |
+  | headless 等极简 profile | 顶层（`dsh-base` 那行） | 直接 `- id: compaction-basic` + `config: { thresholdRatio: 0.75 }` |
+
+  ⚠️ **别照抄成 `- id: compaction-basic` 就以为改上了**：在 web profile 上那个 id 指的是
+  **被停用的宿主平面条目**，patch 会静默落到它身上、运行时毫无变化
+  （`dsh --dump-config` 里能看到 `disabled: true` 与 config 并存 —— 看着像成功）。
+  本机实测过两种：错的写法 `thresholdRatio` 只出现在停用条目上；正确写法下它出现在
+  preset 内的实例上（1M 窗口 → 750k = `min(750k, W−O−65536)`）。
 
 - **"16k"只能指"消息历史"，不能指整个请求**：压缩永远不缩系统提示词 / 工具声明 /
   会话前缀，本机实测信封（system 1,837 + tools 7,949）≈ **9.8k tokens**，
   所以"整个请求 ≤16k"物理上做不到。目标口径取 `messageTokens`。
 
 详见第 2.8 节；配置键见第 5 节。
+
+## 0.4.2 修复说明：压缩守护在 web profile 上曾整块静默失效
+
+0.4.0 的压缩守护把五个服务写在**同一个** `ctx.inject([...])` 里
+（`sessions` / `compaction` / `tokenMeter` / `sessionProjections` / `sessionTitle`）。
+这在 web profile 上等于**整块不挂**：
+
+- `dsh-web-app` 把宿主平面的 `compaction-basic` 打了 `disabled: true`，真正生效的压缩
+  后端挂在**每个 agent preset 内部**（`isolate: {compaction: true}`）；
+- 本插件挂在**根作用域** ⇒ `compaction` 永远不就绪 ⇒ 回调永不执行 ⇒
+  **连只需要 `sessions` 的"压缩前备份"半边也一起没了**，而且不报错。
+
+实测（2026-10-22，dsh `0.2.1-rc.2` + web profile）：
+
+| 观测 | 结果 |
+|---|---|
+| 探针逐个试五个服务 | `sessions` / `tokenMeter` / `sessionProjections` / `sessionTitle` 就绪，**`compaction` 不就绪** |
+| 真实发生的压缩 | 会话 `session-91031863` 于 07:29:33 / 07:33:30 / 07:33:48 压缩三次 |
+| 备份落点 | `$DSH_HOME/memory-win/session-backups/` **连目录都没建** |
+
+修法：**两半边各自声明依赖**。
+
+| 半边 | 需要 | 拿不到时 |
+|---|---|---|
+| 备份（`registerCompactBackup`） | `sessions`（`tokenMeter` / `sessionTitle` / `sessionProjections` 都是可选读取） | 几乎不会缺席 |
+| 收敛（`registerCompactConvergence`） | `compaction` | **只少这一个半边**，备份照常工作 |
+
+"到底装上没有"现在看得见：`logEnabled: true` 时两半边各写一行
+`compact_guard_half half=backup` / `half=converge` —— **缺哪一行就是哪半边没装上**。
+在 web profile 上预期只有 `backup`；收敛半边要等它被挂进 preset 作用域，或宿主把压缩
+服务重新暴露到根作用域（见第 7.3 节）。
+
+---
 
 ## 1 为什么再写一个
 
@@ -252,7 +287,12 @@ Linux/macOS，在 Windows 上有三类失效：
 - 三条失效纪律：写失败静默停写（不重试不报错，不给注定失败的磁盘每轮刷屏）；所有日志入口永不抛；
   关闭时零副作用（不建目录、不读文件）。
 
-### 2.8 压缩守护：压缩前备份 + 压缩后收敛（0.4.0）
+### 2.8 压缩守护：压缩前备份 + 压缩后收敛（0.4.0，0.4.2 修依赖拆分）
+
+⚠️ **两半边是分开装配的**（0.4.2）：备份只 `inject(["sessions"])`，收敛单独
+`inject(["compaction"])`。原因见「0.4.2 修复说明」——`compaction` 在 web profile 里只在
+agent preset 的隔离作用域内存在，写在一个 inject 里会让**整块**守护（含备份）静默死掉。
+自查方式：`logEnabled: true` 时看 `compact_guard_half` 那两行。
 
 宿主的压缩是**表层替换**：被遮蔽的事件原样留在 `session.v4.jsonl.zstd` 里，回放仍能重现。
 所以"怕压缩丢信息"这个理由不成立，本插件做备份是另外两个目的：
@@ -286,7 +326,8 @@ grep 会命中重复内容）也**不在 `sessions/` 下**（否则会被会话�
   skippable 帧**都不抛异常**，一律返回空 Buffer。只看 `catch` 计失败的话，一份被截断的
   日志会"看起来解码成功" —— 所以"有载荷却解出空"才算可疑帧。
 
-日志事件（`logEnabled: true` 时）：`compact_backup`、`compact_verify`、`compact_converge`、
+日志事件（`logEnabled: true` 时）：`compact_guard_half`（**两半边各一行**，用来看哪半边
+装上了）、`compact_backup`、`compact_verify`、`compact_converge`、
 `compact_converge_error`、`compact_failed`、`compact_start`（本插件自己发起的那次）、
 `compact_guard_error`。
 
@@ -534,6 +575,13 @@ bundle 得到，不是照 TypeScript 声明推测。
 
 ### 7.3 仍未验证
 
+- **收敛半边在 web profile 上仍未就绪（0.4.2 起是"已知缺席"而不是"静默坏掉"）**：
+  `compaction` 只在 agent preset 的隔离作用域内存在，本插件挂在根作用域 ⇒
+  `registerCompactConvergence` 不执行（**备份半边照常**）。已实测确认的判据是效果日志里
+  只有 `compact_guard_half half=backup`、没有 `half=converge`。要让收敛也在 web 下生效，
+  得把插件挂进 preset 的 `config.plugins`，或让宿主把压缩服务重新暴露到根作用域 ——
+  两条都还没做（前者要动插件挂载形态，后者与 `dsh-web-app` 的"后端随 preset 走"设计相冲、
+  且有双后端重复压缩的风险）。
 - ~~0.3.0 记忆视图宿主内实测未做~~ **✅ 已闭合（0.3.1，第 14 轮）**：首装即 404（缺陷 D8：直接点号读
   未声明的 `ctx.webServer` 被 Cordis 拒绝），改子作用域后重启实测通过——设置页显示全局层 +
   6 个登记工作区、展开取数与两档渲染正常、按钮禁用态正确、无 HTTP 错误。逐轮证据见进度文档
@@ -542,6 +590,10 @@ bundle 得到，不是照 TypeScript 声明推测。
 - **本机单测基线 179 / 185**：6 项失败（adapter-patch 1、cleanup 1、log 2、mount 2）在未修改基线上
   同样失败、用例名一致，正常权限重跑结果相同——**不能全部归因沙箱权限，归因待查**。
   涉及读真实已装适配器与其它工作区的用例，疑似本机环境状态漂移；记忆视图未触碰这些行为。
+  （0.4.2 后在 Linux 上跑全量是 **201 / 208**：同一批 6 项 + `paths` 里那条硬编码
+  `E:\Game\repo` 的用例；这 7 项**单文件跑全过**——`mount` 33/33、`log` 12/12、
+  `cleanup` 19/19、`compact-guard` 22/22 ⇒ 属于跨文件测试污染 + Windows 专属断言，
+  不是功能缺陷。）
 - 效果日志的四个边缘分支只有单测覆盖：1 MB 轮转、写失败停写、`attempt` 流、`config_error`。
   都要刻意构造故障或超量才会在真实磁盘上发生。
 - `write_alarm` 的触发分支同理，宿主内不可自然触发。

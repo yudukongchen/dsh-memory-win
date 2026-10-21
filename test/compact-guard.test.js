@@ -16,6 +16,7 @@ import { zstdCompressSync } from "node:zlib";
 import { afterEach, beforeEach, test } from "node:test";
 
 import { initConfig, normalizeConfig } from "../lib/config.js";
+import { logFilePath } from "../lib/log.js";
 import {
   backupBaseName,
   backupRoot,
@@ -32,6 +33,8 @@ import {
   isBalanceError,
   messageTokensOf,
   planConvergeRange,
+  registerCompactBackup,
+  registerCompactConvergence,
   registerCompactGuard,
   resetCompactGuardForTests,
 } from "../lib/compact-guard.js";
@@ -349,6 +352,88 @@ function fakeGuardCtx(options = {}) {
 
   return { ctx, record, state, listeners };
 }
+
+test("守护：备份半边**不需要 compaction** 也能挂上（0.4.2 回归）", async () => {
+  // 真实缺陷现场（2026-10-22，web profile）：宿主平面的 compaction-basic 被
+  // dsh-web-app 停用，真正生效的实例在 agent preset 的隔离作用域里，而本插件挂在
+  // 根作用域 ⇒ 原来那个"五个服务一起等"的 inject 永远不就绪 ⇒ **连备份也没了**。
+  // 所以这里刻意只给 sessions（连 tokenMeter/sessionTitle/sessionProjections 都不给，
+  // 它们在生产代码里全是 `?.` 可选读取）。
+  const sessionId = "session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  writeSessionLog(sessionId, [
+    { type: "session", id: sessionId },
+    { seq: 1, type: "user/message", data: { text: "hi" } },
+    { seq: 2, type: "compaction/start", data: { compactionId: "c-only-sessions", turn: 1 } },
+  ]);
+
+  const listeners = new Map();
+  let flushes = 0;
+  const bareCtx = {
+    effect(factory) {
+      const dispose = factory();
+      return typeof dispose === "function" ? dispose : () => {};
+    },
+    on(event, listener) {
+      listeners.set(event, listener);
+      return () => listeners.delete(event);
+    },
+    sessions: {
+      async flush() {
+        flushes += 1;
+        return true;
+      },
+    },
+    // 故意没有 compaction / tokenMeter / sessionTitle / sessionProjections
+  };
+
+  registerCompactBackup(bareCtx);
+  assert.equal(typeof listeners.get("session/event"), "function", "备份半边必须只凭 sessions 就挂上");
+  assert.equal(listeners.has("agent/pre-step"), false, "备份半边不得注册收敛监听器");
+
+  listeners.get("session/event")(
+    { id: sessionId },
+    { type: "compaction/start", seq: 2, data: { compactionId: "c-only-sessions", turn: 1 } },
+  );
+  await tick();
+
+  assert.equal(flushes, 1);
+  const dir = join(backupRoot(), sessionId);
+  assert.equal(existsSync(dir), true, "只给 sessions 也必须真的落下备份");
+  const metaName = readdirSync(dir).find((name) => name.endsWith(".meta.json"));
+  const meta = JSON.parse(readFileSync(join(dir, metaName), "utf8"));
+  assert.equal(meta.compactionId, "c-only-sessions");
+  assert.equal(meta.totalTokens, null, "缺 tokenMeter 时记 null，而不是崩掉");
+  assert.equal(meta.title, null, "缺 sessionTitle 时标题记 null，而不是崩掉");
+});
+
+test("守护：收敛半边只挂 agent/pre-step，且不依赖备份状态", async () => {
+  arm();
+  const { ctx, record, listeners } = fakeGuardCtx({ messageTokens: 60000, afterTokens: 3000 });
+  registerCompactConvergence(ctx);
+
+  assert.equal(listeners.has("agent/pre-step"), true, "收敛半边必须挂上 pre-step");
+  assert.equal(listeners.has("session/event"), false, "收敛半边不得越界注册会话事件监听器");
+  assert.equal(record.compactCalls.length, 0, "没观测到压缩就不该动手");
+});
+
+test("守护：两半边各自留一行 compact_guard_half（能不能装上要看得见）", async () => {
+  arm({ logEnabled: true });
+  const { ctx } = fakeGuardCtx();
+  registerCompactBackup(ctx);
+  registerCompactConvergence(ctx);
+
+  const logFile = logFilePath();
+  const rows = readFileSync(logFile, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+    .filter((row) => row.ev === "compact_guard_half");
+  assert.deepEqual(
+    rows.map((row) => row.half).sort(),
+    ["backup", "converge"],
+    "两半边各留一行；缺哪一行就说明那一半没装上（web profile 上收敛半边预期缺席）",
+  );
+});
 
 test("守护：compaction/start 触发备份，落点与命名符合规则", async () => {
   const sessionId = "session-12121212-3434-5656-7878-909090909090";

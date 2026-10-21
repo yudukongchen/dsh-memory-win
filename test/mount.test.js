@@ -54,7 +54,7 @@ afterEach(() => {
  */
 function fakeCtx(options = {}) {
   const { withTools = true, withGuard = true } = options;
-  const record = { sections: [], tools: [], guards: [], listeners: [], cleaned: 0 };
+  const record = { sections: [], tools: [], guards: [], listeners: [], injects: [], cleaned: 0 };
 
   const tools = withTools
     ? {
@@ -78,7 +78,12 @@ function fakeCtx(options = {}) {
     : undefined;
 
   const ctx = {
-    inject() { return { dispose() {} }; },
+    // 记录 inject 请求：0.4.2 的回归点就是"哪些服务被写在同一个 inject 里"
+    //（五个一起等 ⇒ web profile 上永远不就绪 ⇒ 整块守护静默死掉）。
+    inject(services) {
+      record.injects.push(Array.isArray(services) ? [...services] : [services]);
+      return { dispose() {} };
+    },
     effect(factory) {
       const dispose = factory();
       return typeof dispose === "function" ? dispose : () => {};
@@ -370,6 +375,24 @@ test("段文本函数永不抛错（渲染失败也必须降级为可见提示�
   const text = record.sections[0].text(evil);
   assert.equal(typeof text, "string");
   assert.match(text, /dsh-memory-win/);
+});
+
+test("压缩守护：两半边分开 inject —— 备份不等 compaction（0.4.2 回归）", () => {
+  const { ctx, record } = fakeCtx();
+  apply(ctx);
+
+  const lists = record.injects.map((services) => services.join(","));
+  const backup = record.injects.find((services) => services[0] === "sessions");
+  const converge = record.injects.find((services) => services[0] === "compaction");
+
+  // 现场（2026-10-22，web profile）：宿主平面的 compaction-basic 被 dsh-web-app
+  // `disabled: true`，真正生效的实例在每个 agent preset 的隔离作用域内；本插件挂在
+  // 根作用域。原来那个 inject 把五个服务写在一起 ⇒ 永远不就绪 ⇒ **连只要 sessions
+  // 的备份半边也一起消失**（真实压缩发生了三次，一份备份都没有）。
+  assert.equal(typeof backup, "object", "必须有一个只等 sessions 的 inject（备份半边）");
+  assert.equal(backup.includes("compaction"), false, "备份半边不得把 compaction 写进依赖");
+  assert.equal(typeof converge, "object", "收敛半边必须独享一个等 compaction 的 inject");
+  assert.equal(lists.includes("sessions,compaction,tokenMeter,sessionProjections,sessionTitle"), false, "五个服务不许再写回同一个 inject");
 });
 
 test("两条守卫路径**同时**挂载（不是二选一）", () => {
