@@ -279,8 +279,9 @@ grep 会命中重复内容）也**不在 `sessions/` 下**（否则会被会话�
   以命中 provider 的 KV 热前缀缓存。另开会话既丢掉这份缓存、又改不了父会话的表层
   （`compactRegion/compactNow` 作用对象是 `agent.session`），技术上就是死路。
 - **收敛是"补一次"，不是"自己触发"。** 触发器仍是宿主 `agent/pre-step` 里的压力检查；
-  本插件只在自己的 `agent/pre-step` 监听器里看一眼（注册顺序保证它在宿主之后跑），
-  超标才补一次 `compactRegion`。这样宿主缺席时本模块整体不生效，不会把会话卡在半路。
+  本插件只在自己的 `agent/pre-step` 监听器里看一眼，超标才补一次 `compactRegion`。
+  判据是"观测到过 `compaction/end` 且还没补过"而不是"刚压完"，所以注册顺序反过来也正确 ——
+  只是补压会晚一个 step。宿主缺席时本模块整体不生效，不会把会话卡在半路。
 - **坏帧按空输出判定。** 本机实测 Node 22 的 `zstdDecompressSync` 对截断帧、全 `0xFF`、
   skippable 帧**都不抛异常**，一律返回空 Buffer。只看 `catch` 计失败的话，一份被截断的
   日志会"看起来解码成功" —— 所以"有载荷却解出空"才算可疑帧。
