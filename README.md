@@ -2,7 +2,7 @@
 
 DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖、不走 shell、不调用模型。
 
-- 版本 **0.3.2**，单测 **185 例**（`node test/run.mjs`）+ 真实 Cordis 生命周期回归 + 客户端冒烟 33 项 + 宿主契约检查 6 项（`npm test` 串跑）。
+- 版本 **0.4.0**，单测 **204 例**（`node test/run.mjs`）+ 真实 Cordis 生命周期回归 + 客户端冒烟 33 项 + 宿主契约检查 6 项（`npm test` 串跑）。
 - 已装入本机 desktop profile，在真实宿主里跑过 14 轮实测。
 - 实现刻意最小化，但核心机制与安全边界完整、有测试覆盖，仍然算 **demo**。
 
@@ -31,6 +31,39 @@ DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖�
   而 `memory_add` 不允许改已存在分片的首行，只能手工重写首行 —— 重写后用插件自己的
   `listLayer`/`searchMemory` 复核了解析与命中。UI 里此前的「（关键词未设置）」是实态的诚实投影，
   不是页面 bug（空关键词刻意显式写出而不是省略）。
+
+## 0.4.0 变更说明：压缩守护（备份 + 收敛）
+
+宿主自带会话压缩（`@deepseek-ai/dsh-compaction-basic`，挂在 `dsh-base`，默认按上下文
+**80%** 触发）。本版不另造触发器，只补宿主不做、而需求要的两件事：
+
+1. **压缩前备份会话**：监听到 `compaction/start`（压缩事务的持久锁）就把会话日志拷一份
+   到 `$DSH_HOME/memory-win/session-backups/<sessionId>/`，命名
+   `<会话名称>_YYYYMMDD_HHmmss`，三件套：`.jsonl.zstd`（原始字节）+ `.jsonl`（可 grep 的
+   明文，只到压缩起点）+ `.meta.json`。
+2. **压缩后达标校验**：`compaction/end` 后量一次 `contextBreakdown.messageTokens`，
+   超过 `compactTargetTokens`（默认 16000）就补**一次**收敛压缩 —— 含宿主那次，
+   一个压缩周期最多两次。
+
+两条配套事实（都实测过，写在这里免得再推一遍）：
+
+- **阈值不在本插件里**：`75%`/`750k` 由宿主那条 `compaction-basic` 的 `thresholdRatio`
+  决定。要改成 75%，在 profile 的 `cordis.patch.yml` 里加：
+
+  ```yaml
+  - id: compaction-basic
+    name: '@deepseek-ai/dsh-compaction-basic'
+    config:
+      thresholdRatio: 0.75      # 1M 窗口 → 750k（min(750k, W−O−65536)）
+      retainTokens: 8000        # 逐字保留的近期尾部
+      maxTokens: 8000           # 摘要输出上限（默认 65536）
+  ```
+
+- **"16k"只能指"消息历史"，不能指整个请求**：压缩永远不缩系统提示词 / 工具声明 /
+  会话前缀，本机实测信封（system 1,837 + tools 7,949）≈ **9.8k tokens**，
+  所以"整个请求 ≤16k"物理上做不到。目标口径取 `messageTokens`。
+
+详见第 2.8 节；配置键见第 5 节。
 
 ## 1 为什么再写一个
 
@@ -219,6 +252,43 @@ Linux/macOS，在 Windows 上有三类失效：
 - 三条失效纪律：写失败静默停写（不重试不报错，不给注定失败的磁盘每轮刷屏）；所有日志入口永不抛；
   关闭时零副作用（不建目录、不读文件）。
 
+### 2.8 压缩守护：压缩前备份 + 压缩后收敛（0.4.0）
+
+宿主的压缩是**表层替换**：被遮蔽的事件原样留在 `session.v4.jsonl.zstd` 里，回放仍能重现。
+所以"怕压缩丢信息"这个理由不成立，本插件做备份是另外两个目的：
+
+1. **日志不可读**：`session.v4.jsonl.zstd` 是**逐帧** zstd，grep 搜不进去。压缩把历史从
+   上下文里拿掉后，想再翻那一段就只能靠工具解码 —— 于是顺手留一份明文 `.jsonl`；
+2. **压缩点是天然快照时机**：750k 触发的那一刻正是"此刻之前的内容值得留档"的判定点。
+
+落点 `$DSH_HOME/memory-win/session-backups/<sessionId>/`，刻意**不在工作区**（否则仓库内
+grep 会命中重复内容）也**不在 `sessions/` 下**（否则会被会话列表/导出扫成"又一个会话"）。
+命名 `<会话名称>_YYYYMMDD_HHmmss`（本地时间、秒级），标题经清洗：Windows 保留字符、
+控制符、`CON`/`NUL` 这类保留名、超 60 字符都处理；同一秒重复压缩追加 `-2`。
+
+| 文件 | 内容 |
+|---|---|
+| `<名称>.jsonl.zstd` | 原始日志的逐字节拷贝（无损、可放回去重放） |
+| `<名称>.jsonl` | 解码后的明文，**只保留压缩起点之前**的记录（可 grep） |
+| `<名称>.meta.json` | 会话 id / 标题 / compactionId / 起点 seq / 压缩前 token / 时间 |
+
+三个实现决定值得说明：
+
+- **备份不需要另开临时会话。** 它是一次 `flush` + 文件拷贝，无模型参与；而摘要本身由
+  宿主 `ctx.compaction` 用**进程内**辅助调用完成，会逐字节回放系统提示词/工具/被遮蔽区
+  以命中 provider 的 KV 热前缀缓存。另开会话既丢掉这份缓存、又改不了父会话的表层
+  （`compactRegion/compactNow` 作用对象是 `agent.session`），技术上就是死路。
+- **收敛是"补一次"，不是"自己触发"。** 触发器仍是宿主 `agent/pre-step` 里的压力检查；
+  本插件只在自己的 `agent/pre-step` 监听器里看一眼（注册顺序保证它在宿主之后跑），
+  超标才补一次 `compactRegion`。这样宿主缺席时本模块整体不生效，不会把会话卡在半路。
+- **坏帧按空输出判定。** 本机实测 Node 22 的 `zstdDecompressSync` 对截断帧、全 `0xFF`、
+  skippable 帧**都不抛异常**，一律返回空 Buffer。只看 `catch` 计失败的话，一份被截断的
+  日志会"看起来解码成功" —— 所以"有载荷却解出空"才算可疑帧。
+
+日志事件（`logEnabled: true` 时）：`compact_backup`、`compact_verify`、`compact_converge`、
+`compact_converge_error`、`compact_failed`、`compact_start`（本插件自己发起的那次）、
+`compact_guard_error`。
+
 ---
 
 ## 3 五个工具
@@ -359,6 +429,13 @@ Rename-Item .dsh-memory .agent-memory
 | `maxProjectLayers` | 20 | 0–10000 | 一次后台清理最多处理多少个已知工作区 |
 | `credentialPatterns` | `null` | 对象或 `null` | `{ 模式名: 正则字符串 }`，整段替换内置 8 类 |
 | `archivePointer` | 见源码 | 非空串 | 纪律块里解释归档的那句文本 |
+| `compactGuardEnabled` | `true` | 布尔 | 压缩守护总开关（备份 + 收敛，0.4.0） |
+| `compactBackupEnabled` | `true` | 布尔 | 压缩前是否备份会话日志 |
+| `compactBackupPlaintext` | `true` | 布尔 | 备份是否额外落可 grep 的 `.jsonl`（体积约为 zstd 的 3 倍） |
+| `compactBackupKeep` | 3 | 1–100 | 每会话保留几份备份（按份删，不会留半份） |
+| `compactBackupDir` | `""` | 任意单行串 | 备份根目录；空串 = `<DSH_HOME>/memory-win/session-backups` |
+| `compactConvergeEnabled` | `true` | 布尔 | 压缩后超标是否补一次收敛（每周期最多一次） |
+| `compactTargetTokens` | 16000 | 0–10000000 | 收敛目标：`messageTokens` 软目标；`0` = 只校验不收敛 |
 
 启动时校验，配错直接拒绝启动，不会带着半截配置跑。除类型、范围、路径逃逸外还有两条交叉约束：
 `inlineTextMax > factBodyMax` 抛错（提醒永远不会触发）；`stateFile === archiveDir` 抛错（状态文件被当成归档目录）。
@@ -534,7 +611,8 @@ bundle 得到，不是照 TypeScript 声明推测。
 ```
 index.js          挂载：initConfig + section + 五工具（包装 execute 记日志）+ 双路守卫
                   + 当天首次清理定时器 + session/event usage 订阅 + 记忆视图路由接线
-                  （inject: ["systemPrompt","tools"]；webServer 通过独立注入作用域等待就绪）
+                  + 压缩守护接线（0.4.0，五个宿主服务走独立注入作用域）
+                  （inject: ["systemPrompt","tools"]；webServer / compaction 各自独立作用域等待就绪）
 lib/config.js     配置层：默认值、解析顺序、启动校验、凭据模式表
 lib/paths.js      路径与 slug，全部调用时求值；含日期窗口工具
 lib/format.js     纯函数：条目格式 / 日期 / 凭据 / 去重 / id / 取代元数据 / {{ 中和 / 截断提醒
@@ -545,13 +623,17 @@ lib/log.js        效果日志：JSONL 追加、轮转、停写、小时种子�
 lib/map.js        地图档渲染 + 分项统计 + 注入纪律块
 lib/view.js       记忆视图宿主半边（0.3.0）：两条 GET 只读路由、信任门、白名单、档位判定
 lib/client.js     记忆视图浏览器半边（0.3.0）：lazy-CJS 单文件，settings.section 只读面板
+lib/session-backup.js  压缩前备份（0.4.0）：落点/命名清洗、逐帧 zstd 解码、
+                  按 seq 截出压缩前明文、按份保留
+lib/compact-guard.js   压缩守护（0.4.0）：compaction/start → 备份，compaction/end →
+                  messageTokens 校验 → 最多补一次 compactRegion 收敛
 lib/tools.js      五个 ToolDefinition
 lib/guard.js      直写守卫（两条路径共用判定与日志包装）
 lib/context.js    cwd 提取，守卫与工具共用一份
 scripts/pack.mjs  打包并复制到 ~/.dsh/plugin-tarballs/
 tools/            view-lifecycle（真实 Cordis 生命周期回归）+ host-cordis（asar 读取助手）
                   + client-smoke（桩 React/fetch）+ compat-check（读 app.asar 验宿主契约）
-test/             185 个用例 + 同进程运行器
+test/             204 个用例 + 同进程运行器
 ```
 
 分层原则是纯判定与 I/O 分离。`lib/format.js` 完全不碰文件系统，`normalizeConfig` 也是纯函数，

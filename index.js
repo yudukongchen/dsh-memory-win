@@ -30,6 +30,7 @@
 
 import { configNum, configValue, initConfig } from "./lib/config.js";
 import { cwdOf } from "./lib/context.js";
+import { registerCompactGuard } from "./lib/compact-guard.js";
 import { runStartupCleanup } from "./lib/engine.js";
 import { denialText, directWriteDenialLogged, preExecuteGuard } from "./lib/guard.js";
 import { logConfigError, logInject, logInjectError, logToolCall, logUsage } from "./lib/log.js";
@@ -220,6 +221,22 @@ export function apply(ctx, config) {
   ctx.inject(["webServer"], (viewCtx) => {
     registerViewRoutes(viewCtx);
   });
+
+  // ── 5b. 压缩守护（0.4.0）：压缩前备份 + 压缩后达标校验 ──────────────────────
+  //
+  // 阈值（75% / 750k）**不在这里**：它由宿主 `dsh-compaction-basic` 的
+  // `thresholdRatio` 决定，本插件只当"旁观者"——
+  //   · `compaction/start` → 备份会话日志（明细见 lib/session-backup.js）；
+  //   · `compaction/end`   → 量一次消息历史，超标就补一次收敛（lib/compact-guard.js）。
+  //
+  // 五个依赖都是 `dsh-base` 的常驻服务，所以用子作用域声明式等待：极简 profile
+  // 缺任何一个时本模块整体不挂（而不是挂一半、静默失效）。
+  ctx.inject(
+    ["sessions", "compaction", "tokenMeter", "sessionProjections", "sessionTitle"],
+    (guardCtx) => {
+      registerCompactGuard(guardCtx);
+    },
+  );
 
   // ── 6. 效果日志：每轮 usage（KV 命中率）──────────────────────────────────
   //

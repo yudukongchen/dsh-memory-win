@@ -20,6 +20,25 @@
 #       cleanupDays: 7            # 失效条目多少天后可归档，最小 1（默认 3）
 #       cleanupDelaySeconds: 30   # 当天首次启动后延迟多少秒清理（默认 10）
 #       logEnabled: true          # 效果日志：逐事件写 <全局层上级>/logs/debug.jsonl（默认 false）
+#       compactTargetTokens: 12000  # 压缩后收敛目标（messageTokens 软目标，默认 16000）
+#       compactBackupKeep: 5        # 每会话保留几份压缩前备份（默认 3）
+#
+# ## 压缩守护（0.4.0）与阈值归属
+#
+# 本插件**不持有**「上下文到 75% 就压缩」这条阈值：它属于宿主
+# `@deepseek-ai/dsh-compaction-basic`（挂在 `dsh-base`，默认 thresholdRatio 0.8）。
+# 要改成 75%（1M 窗口 → 750k）与更小的保留/摘要预算，在 profile 的
+# `cordis.patch.yml` 里加一条同 id 的 patch：
+#
+#   - id: compaction-basic
+#     name: '@deepseek-ai/dsh-compaction-basic'
+#     config:
+#       thresholdRatio: 0.75
+#       retainTokens: 8000
+#       maxTokens: 8000
+#
+# 本插件在这套机制里只做两件事：压缩前备份会话、压缩后校验 messageTokens 是否落到
+# `compactTargetTokens` 以内（超标最多补一次收敛）。详见 README 第 2.8 节。
 #
 # 全部键、默认值、合法范围与交叉约束见 README 第 5 节「配置」。改完必须**重启**桌面版
 # （profile 的 HMR 只监听 patch 文件、不监听插件模块文件 —— 而配置是在插件模块里读的）。
