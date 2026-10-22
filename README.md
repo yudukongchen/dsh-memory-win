@@ -748,6 +748,7 @@ lib/context.js    cwd 提取，守卫与工具共用一份
 scripts/pack.mjs  打包并复制到 ~/.dsh/plugin-tarballs/
 tools/            view-lifecycle（真实 Cordis 生命周期回归）+ host-cordis（asar 读取助手）
                   + client-smoke（桩 React/fetch）+ compat-check（读 app.asar 验宿主契约）
+                  + verify-compaction-backup（宿主重启后的只读体检：半挂没挂 / 备份合规与否）
 test/             204 个用例 + 同进程运行器
 ```
 
