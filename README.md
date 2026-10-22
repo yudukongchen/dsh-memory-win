@@ -774,6 +774,7 @@ scripts/pack.mjs  打包并复制到 ~/.dsh/plugin-tarballs/
 tools/            view-lifecycle（真实 Cordis 生命周期回归）+ host-cordis（asar 读取助手）
                   + client-smoke（桩 React/fetch）+ compat-check（读 app.asar 验宿主契约）
                   + verify-compaction-backup（宿主重启后的只读体检：半挂没挂 / 备份合规与否）
+                  + verify-preset-patches（用宿主真函数 applyEntryPatches 复演组合，看补丁到底落在哪）
 test/             213 个用例 + 同进程运行器
 ```
 
