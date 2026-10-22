@@ -2,7 +2,7 @@
 
 DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖、不走 shell、不调用模型。
 
-- 版本 **0.4.2**，单测 **208 例**（`node test/run.mjs`）+ 真实 Cordis 生命周期回归 + 客户端冒烟 33 项 + 宿主契约检查 6 项（`npm test` 串跑）。
+- 版本 **0.4.3**，单测 **209 例**（`node test/run.mjs`）+ 真实 Cordis 生命周期回归 + 客户端冒烟 33 项 + 宿主契约检查 6 项（`npm test` 串跑）。
 - 已装入本机 desktop profile，在真实宿主里跑过 14 轮实测。
 - 实现刻意最小化，但核心机制与安全边界完整、有测试覆盖，仍然算 **demo**。
 
@@ -97,6 +97,63 @@ DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖�
 `compact_guard_half half=backup` / `half=converge` —— **缺哪一行就是哪半边没装上**。
 在 web profile 上预期只有 `backup`；收敛半边要等它被挂进 preset 作用域，或宿主把压缩
 服务重新暴露到根作用域（见第 7.3 节）。
+
+---
+
+## 0.4.3 变更说明：收敛专用形态（`convergeOnly`）
+
+0.4.2 之后还剩一个空：**收敛半边在 web profile 上找不到 `compaction` 服务**。
+原因不是"挂错地方"，而是那条服务被隔离在 preset 的 `cordis:group(compaction)` 子树里。
+
+纯 Cordis 实测（`ctx.isolate('compaction')` 后 provide 一个假服务）：
+
+```
+组内 ctx.get('compaction') = 拿得到 ✓
+兄弟 ctx.get('compaction') = undefined ✗
+根   ctx.get('compaction') = undefined ✗
+```
+
+⇒ 结论很反直觉：**把插件挂在 preset 的 plugins 层（跟 persona / tool-fs 并列）照样拿不到**；
+唯一拿得到的位置是那条 `compaction` 组**自己的 config 列表**。可完整形态挂在这里会重名注册
+工具/提示词段/路由（`tool "memory_list" is already registered`）—— 一个模块挂两处必须分工。
+
+所以 0.4.3 加了**收敛专用形态**：`apply(ctx, { convergeOnly: true })` 时只挂
+`agent/pre-step` 上的"压缩后达标校验 + 一次补压"监听，**工具、提示词段、守卫、清理、
+记忆视图一概不碰**，也**不调用 `initConfig`**（模块级配置是单例，两份都初始化会互相覆盖；
+它按需读取，那几项由完整形态初始化）。
+
+挂法（profile 的 `cordis.patch.yml`，在**你在用的那个 preset** 的 compaction 组里加一行）：
+
+```yaml
+- id: preset-standard                      # 你实际在用的 preset
+  name: '@deepseek-ai/dsh-agent-preset'
+  config:
+    id: standard
+    order: 1
+    plugins:
+      # …（原有条目照抄，别漏）
+      - id: compaction
+        name: cordis:group
+        group: true
+        isolate: { compaction: true, toolResultPruner: true }
+        config:
+          - id: compaction-basic
+            name: '@deepseek-ai/dsh-compaction-basic'
+          - id: dsh-memory-win-converge     # ← 这一行是新增的
+            name: 'dsh-memory-win'
+            config:
+              convergeOnly: true
+          # …（command-compact / tool-result-pruner 照旧）
+```
+
+⚠️ **别把完整形态（不带 `convergeOnly`）挂进 preset**：工具重名注册会直接报错，而且
+"只有这个 preset 的会话有记忆"是静默的退化。根上那份继续管工具 / 注入 / 备份 / 清理 / 视图。
+
+两处**共用同一份模块状态**：根上那份的 `session/event` 记下"压缩发生了"，组里那份的
+`agent/pre-step` 读它、超标就补一次 —— 事件是跨作用域广播的，正好接上。
+
+生效范围是**这个 preset 的所有会话**（新建的和老会话都算，老会话下一轮就带上），
+不需要逐会话开启。
 
 ---
 
@@ -290,8 +347,13 @@ Linux/macOS，在 Windows 上有三类失效：
 ### 2.8 压缩守护：压缩前备份 + 压缩后收敛（0.4.0，0.4.2 修依赖拆分）
 
 ⚠️ **两半边是分开装配的**（0.4.2）：备份只 `inject(["sessions"])`，收敛单独
-`inject(["compaction"])`。原因见「0.4.2 修复说明」——`compaction` 在 web profile 里只在
+`inject(["compaction"])`。原因见「0.4.2 修复说明」—— `compaction` 在 web profile 里只在
 agent preset 的隔离作用域内存在，写在一个 inject 里会让**整块**守护（含备份）静默死掉。
+
+而收敛半边要真正就绪，还得用 `convergeOnly: true` 把它挂进 preset 的 **compaction 组**里
+（0.4.3，见「0.4.3 变更说明」）：服务被 `isolate: {compaction: true}` 关在那条子树内，
+组外（含根、含 preset 的其它插件）都拿不到。
+
 自查方式：`logEnabled: true` 时看 `compact_guard_half` 那两行。
 
 宿主的压缩是**表层替换**：被遮蔽的事件原样留在 `session.v4.jsonl.zstd` 里，回放仍能重现。
@@ -575,13 +637,13 @@ bundle 得到，不是照 TypeScript 声明推测。
 
 ### 7.3 仍未验证
 
-- **收敛半边在 web profile 上仍未就绪（0.4.2 起是"已知缺席"而不是"静默坏掉"）**：
-  `compaction` 只在 agent preset 的隔离作用域内存在，本插件挂在根作用域 ⇒
-  `registerCompactConvergence` 不执行（**备份半边照常**）。已实测确认的判据是效果日志里
-  只有 `compact_guard_half half=backup`、没有 `half=converge`。要让收敛也在 web 下生效，
-  得把插件挂进 preset 的 `config.plugins`，或让宿主把压缩服务重新暴露到根作用域 ——
-  两条都还没做（前者要动插件挂载形态，后者与 `dsh-web-app` 的"后端随 preset 走"设计相冲、
-  且有双后端重复压缩的风险）。
+- **收敛半边的"补压"行为待真实压缩观测（0.4.3）**：`compaction` 只在 preset 的
+  `cordis:group(compaction)` 子树里，所以要走 `convergeOnly: true` 把**收敛专用实例**挂进
+  那个组（专利形态见「0.4.3 变更说明」）。装好后判据是效果日志里出现
+  `compact_guard_half half=converge`；真正的"补压"只在宿主压完仍高于
+  `compactTargetTokens`（默认 16000）时才发生，本机尚无该场景的自然样本。
+  ⚠️ 已实测**不可行**的两条路：把完整形态挂进 preset（工具重名报错）、
+  把插件挂在 preset 的 plugins 层（拿不到服务，纯 Cordis 实验见上）。
 - ~~0.3.0 记忆视图宿主内实测未做~~ **✅ 已闭合（0.3.1，第 14 轮）**：首装即 404（缺陷 D8：直接点号读
   未声明的 `ctx.webServer` 被 Cordis 拒绝），改子作用域后重启实测通过——设置页显示全局层 +
   6 个登记工作区、展开取数与两档渲染正常、按钮禁用态正确、无 HTTP 错误。逐轮证据见进度文档

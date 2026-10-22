@@ -395,6 +395,20 @@ test("压缩守护：两半边分开 inject —— 备份不等 compaction（0.4
   assert.equal(lists.includes("sessions,compaction,tokenMeter,sessionProjections,sessionTitle"), false, "五个服务不许再写回同一个 inject");
 });
 
+test("收敛专用形态：只挂 compaction 的 pre-step，别的一概不碰（0.4.3）", () => {
+  // 同一个模块会被挂两处：根上那份管工具/注入/备份/清理/视图，preset 的 compaction 组里
+  // 那份只做收敛（它才拿得到被 isolate 的 compaction 服务）。完整形态挂两份会重名注册工具，
+  // 所以收敛专用形态**一个工具、一段提示词、一条路由、一个定时器都不许碰**。
+  const { ctx, record } = fakeCtx();
+  apply(ctx, { convergeOnly: true });
+
+  assert.deepEqual(record.injects, [["compaction"]], "只许有一个 inject，且只等 compaction");
+  assert.equal(record.tools.length, 0, "收敛专用形态不得注册任何工具");
+  assert.equal(record.sections.length, 0, "收敛专用形态不得注册提示词段");
+  assert.equal(record.guards.length, 0, "收敛专用形态不得挂写入守卫");
+  assert.equal(record.listeners.length, 0, "收敛专用形态不得订阅别的事件");
+});
+
 test("两条守卫路径**同时**挂载（不是二选一）", () => {
   const { ctx, record } = fakeCtx();
   apply(ctx);

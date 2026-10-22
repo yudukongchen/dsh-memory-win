@@ -62,11 +62,41 @@ export const inject = ["systemPrompt", "tools"];
 /**
  * 挂载。
  *
+ * ## 两种挂载形态（0.4.3 起）
+ *
+ * 同一个模块可以被挂**两处**，按 `config.convergeOnly` 区分：
+ *
+ * | 形态 | 挂在哪 | 干什么 |
+ * |---|---|---|
+ * | 完整（默认） | profile 顶层（bundle 行） | 提示词地图、五个工具、写入守卫、清理、记忆视图、**备份半边** |
+ * | 收敛专用（`convergeOnly: true`） | 某个 agent preset 的 **compaction 组内部** | **只**注册「压缩后达标校验 + 一次补压」的监听器 |
+ *
+ * 为什么要分两处：`compaction` 服务被 preset 用 `isolate: {compaction: true}` 隔离在
+ * 那条 `cordis:group(compaction)` 的子树里 —— **组外（含根、含 preset 的其它插件）都拿不到**
+ * （纯 Cordis 实测：组内 `ctx.get('compaction')` 有、兄弟与根都是 undefined）。
+ * 所以想要收敛，就得在那条组里挂一份；但完整形态挂两份会重名注册工具
+ * （`tool "memory_list" is already registered`）⇒ 收敛专用形态**只挂监听器**，别的什么都不碰。
+ *
+ * 事件是跨作用域广播的，所以两处**共用**同一份模块状态：根上那份的 `session/event`
+ * 记录"压缩发生了"，组里那份的 `agent/pre-step` 读它、超标就补一次 —— 正好接上。
+ *
+ * ⚠️ 收敛专用形态**不调用 `initConfig`**：模块级配置是单例，两份都初始化会互相覆盖；
+ * 它只按需读（`compactGuardEnabled` / `compactConvergeEnabled` / `compactTargetTokens`），
+ * 那些值由完整形态初始化、调用时读取，所以挂载顺序无关。
+ *
  * @param {object} ctx - cordis 插件上下文。
  * @param {object} [config] - profile patch 的 `config:` 段（宿主按 `apply(ctx, config)` 传入）。
  *   非法配置会在这里**抛错、拒绝启动** —— 见 lib/config.js 的解析顺序与交叉校验。
  */
 export function apply(ctx, config) {
+  // ── 0a. 收敛专用形态：只挂 agent/pre-step 收敛监听器，其余一概不碰 ──────────
+  if (config?.convergeOnly === true) {
+    ctx.inject(["compaction"], (convergeCtx) => {
+      registerCompactConvergence(convergeCtx);
+    });
+    return;
+  }
+
   // ── 0. 配置层：先于一切读取 ──────────────────────────────────────────────
   // 必须在任何 `configNum()` 被调用之前完成（提示词段、工具描述、清理时机都读它）。
   // 抛错是刻意的：配错了要看得见，不要带着半截配置跑。
