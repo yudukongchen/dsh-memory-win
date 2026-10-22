@@ -12,3 +12,6 @@ dist/
 *.tmp-*
 *.log
 /docs
+
+# 生成物/临时文件（tools/gen-preset-override.mjs 的输出等）
+.scratch/
