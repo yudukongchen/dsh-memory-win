@@ -2,7 +2,7 @@
 
 DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖、不走 shell、不调用模型。
 
-- 版本 **0.4.3**，单测 **209 例**（`node test/run.mjs`）+ 真实 Cordis 生命周期回归 + 客户端冒烟 33 项 + 宿主契约检查 6 项（`npm test` 串跑）。
+- 版本 **0.4.4**，单测 **213 例**（`node test/run.mjs`）+ 真实 Cordis 生命周期回归 + 客户端冒烟 33 项 + 宿主契约检查 6 项（`npm test` 串跑）。
 - 已装入本机 desktop profile，在真实宿主里跑过 14 轮实测。
 - 实现刻意最小化，但核心机制与安全边界完整、有测试覆盖，仍然算 **demo**。
 
@@ -154,6 +154,31 @@ DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖�
 
 生效范围是**这个 preset 的所有会话**（新建的和老会话都算，老会话下一轮就带上），
 不需要逐会话开启。
+
+---
+
+## 0.4.4 修复说明：备份文件名曾静默退化成会话 id（D9）
+
+0.4.2 把备份半边的 `inject` 收窄成只声明 `sessions`，然后在备份时用
+`ctx.tokenMeter` / `ctx.sessionTitle` 去"顺便读一下"——但 **Cordis 的上下文代理对未声明的
+服务名是抛异常，不是返回 undefined**（`cordis/lib/index.js:676`
+`cannot get property "${prop}" without inject`）。两处 `try/catch` 把它吞了，于是：
+
+- 标题**静默退化成会话 id**，而需求要的是 `${会话名称}_YYYYMMDD_HHmmss`；
+- `compact_backup.totalTokens` 记成 `null`。
+
+宿主内实测（2026-10-22，desktop，会话 `session-9e348425`，标题投影里明明是"测试01"）：
+`/compact` 触发的备份落成了 `session-9e348425-…_20261022_112407.*`。
+
+修法：**声明了再读**。备份半边再挂一个可选子作用域
+`ctx.inject(["sessionTitle","tokenMeter","sessionProjections"], …)` 把三个服务捕获下来，
+读取走三级回退 —— 富读取半边 → `ctx.get(name)`（它返回 undefined 而不是抛）→ 标题投影
+`sessionProjections.stateOf(session, "title")`；三级都空才退到会话 id，并在
+`compact_backup` 里记 `titleFrom`，让"为什么名字不是标题"永远有据可依。
+
+顺带修掉**测试保真度**问题：0.4.2/0.4.3 的假 ctx 是普通对象，`ctx.sessionTitle?.x`
+在它身上只得到 undefined，所以"未声明就抛"这条真实行为**从没被测到**。现在假 ctx 改成
+照 Cordis 行为的 Proxy（未声明即抛），并新增 4 个用例覆盖三条回退路径。
 
 ---
 
@@ -749,7 +774,7 @@ scripts/pack.mjs  打包并复制到 ~/.dsh/plugin-tarballs/
 tools/            view-lifecycle（真实 Cordis 生命周期回归）+ host-cordis（asar 读取助手）
                   + client-smoke（桩 React/fetch）+ compat-check（读 app.asar 验宿主契约）
                   + verify-compaction-backup（宿主重启后的只读体检：半挂没挂 / 备份合规与否）
-test/             204 个用例 + 同进程运行器
+test/             213 个用例 + 同进程运行器
 ```
 
 分层原则是纯判定与 I/O 分离。`lib/format.js` 完全不碰文件系统，`normalizeConfig` 也是纯函数，

@@ -285,10 +285,59 @@ test("messageTokensOf：投影缺席时返回 undefined（而不是 0）", () =>
 // ── 守护接线 ─────────────────────────────────────────────────────────────────
 
 /**
- * 造一个能承接压缩守护的假 ctx。
+ * 造一个**像真 Cordis 那样**的假 ctx：读取**未声明**的服务名一律**抛异常**。
+ *
+ * 这一条是 0.4.4 的教训。0.4.2/0.4.3 的假 ctx 是普通对象，`ctx.sessionTitle?.x`
+ * 在它身上只会得到 `undefined`，于是"未声明就抛"这条真实行为**从没被测到** ——
+ * 线上表现是备份文件名静默退化成会话 id（`cordis/lib/index.js:676`
+ * `cannot get property "${prop}" without inject`）。
+ *
+ * @param {object} input - 组成。
+ * @param {string[]} input.declared - 该作用域声明的服务名。
+ * @param {object} input.world - 全部可用服务。
+ * @param {Map} input.listeners - 监听器表（`on` 往里塞）。
+ * @param {string[]} [input.unavailable] - 故意"不就绪"的服务（`inject` 因此不回调）。
+ * @returns {object} 假 ctx。
+ */
+function cordisLikeCtx({ declared = [], world = {}, listeners, unavailable = [] }) {
+  const declaredSet = new Set(declared);
+  const base = {
+    effect(factory) {
+      const dispose = factory();
+      return typeof dispose === "function" ? dispose : () => {};
+    },
+    on(event, listener) {
+      listeners.set(event, listener);
+      return () => listeners.delete(event);
+    },
+    inject(deps, callback) {
+      const ready = deps.every((name) => world[name] !== undefined && !unavailable.includes(name));
+      if (ready) callback(cordisLikeCtx({ declared: deps, world, listeners, unavailable }));
+      return { dispose() {} };
+    },
+    // 测试里刻意只在"已声明"时返回：这样读标题必须真的走富读取半边，
+    // 而不是靠 `ctx.get` 侥幸成功（真宿主的 get 语义与本条无关紧要，两条路都要能通）。
+    get(name) {
+      return declaredSet.has(name) ? world[name] : undefined;
+    },
+  };
+  return new Proxy(base, {
+    get(target, prop) {
+      if (Reflect.has(target, prop)) return Reflect.get(target, prop);
+      if (typeof prop === "string" && world[prop] !== undefined) {
+        if (declaredSet.has(prop)) return world[prop];
+        throw new Error(`cannot get property "${prop}" without inject`);
+      }
+      return undefined;
+    },
+  });
+}
+
+/**
+ * 造一个能承接压缩守护的假 ctx（五个服务都声明，用于收敛半边与整体装配）。
  *
  * @param {object} [options] - 注入点。
- * @returns {object} `{ctx, record}`，`record` 收集监听器与调用。
+ * @returns {object} `{ctx, record, state, listeners}`。
  */
 function fakeGuardCtx(options = {}) {
   const listeners = new Map();
@@ -304,15 +353,7 @@ function fakeGuardCtx(options = {}) {
   };
   let balanceFailures = options.balanceFailures ?? 0;
 
-  const ctx = {
-    effect(factory) {
-      const dispose = factory();
-      return typeof dispose === "function" ? dispose : () => {};
-    },
-    on(event, listener) {
-      listeners.set(event, listener);
-      return () => listeners.delete(event);
-    },
+  const world = {
     sessions: {
       async flush() {
         record.flushes += 1;
@@ -323,11 +364,14 @@ function fakeGuardCtx(options = {}) {
       measure: () => ({ totalTokens: 750000, nodes: [] }),
     },
     sessionTitle: {
-      get: () => ({ title: "假标题" }),
+      get: () => (options.titleExists === false ? undefined : { title: options.title ?? "假标题" }),
     },
     sessionProjections: {
-      stateOf: (_session, key) =>
-        key === "contextBreakdown" ? { nodes: state.nodes, breakdown: { messageTokens: state.messageTokens } } : undefined,
+      stateOf: (_session, key) => {
+        if (key === "contextBreakdown") return { nodes: state.nodes, breakdown: { messageTokens: state.messageTokens } };
+        if (key === "title") return options.projectionTitle ?? null;
+        return undefined;
+      },
     },
     compaction: {
       async compactRegion(start, end, agent, _signal) {
@@ -350,7 +394,22 @@ function fakeGuardCtx(options = {}) {
     },
   };
 
-  return { ctx, record, state, listeners };
+  const ctx = cordisLikeCtx({
+    declared: ["sessions", "tokenMeter", "sessionTitle", "sessionProjections", "compaction"],
+    world,
+    listeners,
+    unavailable: options.unavailable ?? [],
+  });
+
+  // 只声明 sessions 的"备份半边作用域"——线上根作用域就是这个形态。
+  const backupCtx = cordisLikeCtx({
+    declared: ["sessions"],
+    world,
+    listeners,
+    unavailable: options.unavailable ?? [],
+  });
+
+  return { ctx, backupCtx, record, state, listeners };
 }
 
 test("守护：备份半边**不需要 compaction** 也能挂上（0.4.2 回归）", async () => {
@@ -376,6 +435,10 @@ test("守护：备份半边**不需要 compaction** 也能挂上（0.4.2 回归�
     on(event, listener) {
       listeners.set(event, listener);
       return () => listeners.delete(event);
+    },
+    // 富读取子作用域永远不就绪：三个可选服务一个都拿不到。
+    inject() {
+      return { dispose() {} };
     },
     sessions: {
       async flush() {
@@ -416,6 +479,72 @@ test("守护：收敛半边只挂 agent/pre-step，且不依赖备份状态", as
   assert.equal(record.compactCalls.length, 0, "没观测到压缩就不该动手");
 });
 
+// ── 命名来源（0.4.4：标题曾经静默退化成会话 id）────────────────────────────
+
+test("守护：富读取半边接上后，标题来自 sessionTitle，落名用会话名称", async () => {
+  arm();
+  const sessionId = "session-14141414-2525-3636-4747-585858585858";
+  writeSessionLog(sessionId, [{ type: "session", id: sessionId }, { seq: 2, type: "compaction/start", data: { compactionId: "c-t" } }]);
+
+  const { backupCtx, listeners, record } = fakeGuardCtx({ title: "测试01" });
+  registerCompactBackup(backupCtx);
+  listeners.get("session/event")({ id: sessionId }, { type: "compaction/start", seq: 2, data: { compactionId: "c-t" } });
+  await tick();
+
+  assert.equal(record.flushes, 1);
+  const dir = join(backupRoot(), sessionId);
+  const metaName = readdirSync(dir).find((name) => name.endsWith(".meta.json"));
+  assert.match(metaName, /^测试01_\d{8}_\d{6}\.meta\.json$/, "需求要求的是 <会话名称>_YYYYMMDD_HHmmss");
+  const meta = JSON.parse(readFileSync(join(dir, metaName), "utf8"));
+  assert.equal(meta.title, "测试01");
+  assert.equal(meta.totalTokens, 750000, "富读取半边也把 tokenMeter 带上了");
+});
+
+test("守护：服务没有标题事件时退到标题投影（仍是会话名称，不是会话 id）", async () => {
+  arm();
+  const sessionId = "session-15151515-2626-3737-4848-595959595959";
+  writeSessionLog(sessionId, [{ type: "session", id: sessionId }, { seq: 2, type: "compaction/start", data: { compactionId: "c-p" } }]);
+
+  const { backupCtx, listeners } = fakeGuardCtx({ titleExists: false, projectionTitle: "投影标题" });
+  registerCompactBackup(backupCtx);
+  listeners.get("session/event")({ id: sessionId }, { type: "compaction/start", seq: 2, data: { compactionId: "c-p" } });
+  await tick();
+
+  const names = readdirSync(join(backupRoot(), sessionId));
+  assert.equal(names.some((name) => name.startsWith("投影标题_")), true);
+});
+
+test("守护：三个服务都缺席时退到会话 id，并留下 titleFrom 证据", async () => {
+  const sessionId = "session-16161616-2727-3838-4949-606060606060";
+  writeSessionLog(sessionId, [{ type: "session", id: sessionId }, { seq: 2, type: "compaction/start", data: { compactionId: "c-f" } }]);
+  // writeSessionLog 内部会 arm() 一次（把 logEnabled 复位成 false），所以开关要压在它之后。
+  arm({ logEnabled: true });
+
+  const { backupCtx, listeners } = fakeGuardCtx({ unavailable: ["sessionTitle", "tokenMeter", "sessionProjections"] });
+  registerCompactBackup(backupCtx);
+  listeners.get("session/event")({ id: sessionId }, { type: "compaction/start", seq: 2, data: { compactionId: "c-f" } });
+  await tick();
+
+  const names = readdirSync(join(backupRoot(), sessionId));
+  assert.equal(names.some((name) => name.startsWith(`${sessionId}_`)), true, "退化也要照常备份");
+
+  const rows = readFileSync(logFilePath(), "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+    .filter((row) => row.ev === "compact_backup");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].titleFrom, "fallback-sessionId", "回来查'为什么名字不是标题'时要有据可依");
+  assert.equal(rows[0].totalTokens, null);
+});
+
+test("守护：未声明的服务名会抛（假 ctx 现在照真 Cordis 的行为）", () => {
+  const { backupCtx } = fakeGuardCtx();
+  // 这正是 0.4.2 之漏：普通对象上 `ctx.sessionTitle` 只得到 undefined，
+  // 于是"未声明就抛"从没被测到，标题静默变成会话 id。
+  assert.throws(() => backupCtx.sessionTitle, /without inject/);
+});
+
 test("守护：两半边各自留一行 compact_guard_half（能不能装上要看得见）", async () => {
   arm({ logEnabled: true });
   const { ctx } = fakeGuardCtx();
@@ -430,8 +559,8 @@ test("守护：两半边各自留一行 compact_guard_half（能不能装上要�
     .filter((row) => row.ev === "compact_guard_half");
   assert.deepEqual(
     rows.map((row) => row.half).sort(),
-    ["backup", "converge"],
-    "两半边各留一行；缺哪一行就说明那一半没装上（web profile 上收敛半边预期缺席）",
+    ["backup", "backup-enrich", "converge"],
+    "三行：备份半边、富读取半边、收敛半边；缺哪行就说明那部分没装上（web/desktop 上收敛半边预期缺席）",
   );
 });
 
