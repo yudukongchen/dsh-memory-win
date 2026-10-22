@@ -2,7 +2,7 @@
 
 DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖、不走 shell、不调用模型。
 
-- 版本 **0.4.4**，单测 **213 例**（`node test/run.mjs`）+ 真实 Cordis 生命周期回归 + 客户端冒烟 33 项 + 宿主契约检查 6 项（`npm test` 串跑）。
+- 版本 **0.4.5**，单测 **213 例**（`node test/run.mjs`）+ 真实 Cordis 生命周期回归 + 客户端冒烟 33 项 + 宿主契约检查 6 项（`npm test` 串跑）。
 - 已装入本机 desktop profile，在真实宿主里跑过 14 轮实测。
 - 实现刻意最小化，但核心机制与安全边界完整、有测试覆盖，仍然算 **demo**。
 
@@ -154,6 +154,32 @@ DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖�
 
 生效范围是**这个 preset 的所有会话**（新建的和老会话都算，老会话下一轮就带上），
 不需要逐会话开启。
+
+---
+
+## 0.4.5 部署变更：preset-cordis 整段覆盖（本机 desktop profile）
+
+压缩守护的**收敛半边**要挂进 agent preset 的 compaction 组才拿得到 `compaction` 服务，
+而 preset 内部的行**打不中 id 补丁**（详见 §2.8 与 `tools/verify-preset-patches.mjs`），
+所以只能整段覆盖 `preset-cordis` 那一行。生成方式（不是手抄）：
+
+```bash
+node tools/gen-preset-override.mjs        # → .scratch/preset-cordis-override.yml（164 行）
+node tools/verify-preset-patches.mjs      # 叠加后看清落点：只有 cordis 变
+```
+
+生成的覆盖只改两处：`compaction` 组里 `compaction-basic` 的
+`thresholdRatio: 0.75 / retainTokens: 8000 / maxTokens: 8000`，以及追加一行
+`dsh-memory-win-converge`（`name: 'dsh-memory-win'` + `config: { convergeOnly: true }`）。
+
+⚠️ **代价：整段覆盖把该 preset 钉在生成时的定义上。** 宿主升级后若改了
+`presets/cordis.patch.yml`（文案、工具行、隔离项…），你的覆盖会把它盖回旧版且**不报错**。
+**升级后重跑一次生成器再覆盖**即可 —— 基线永远取自当前宿主的源定义，不会把旧内容滚进去。
+profile 里的段落上方也写了这句提醒；改前备份保留在
+`cordis.patch.yml.bak-<时间戳>`。
+
+验收：重启后效果日志出现 `compact_guard_half half=converge`（三条全齐：
+`backup` / `backup-enrich` / `converge`），且压缩触发点从 800k 提前到 750k。
 
 ---
 
