@@ -2,7 +2,7 @@
 
 DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖、不走 shell、不调用模型。
 
-- 版本 **0.4.7**，单测 **213 例**（`node test/run.mjs`）+ 真实 Cordis 生命周期回归 + 客户端冒烟 33 项 + 宿主契约检查 6 项（`npm test` 串跑）。
+- 版本 **0.4.8**，单测 **213 例**（`node test/run.mjs`）+ 真实 Cordis 生命周期回归 + 客户端冒烟 33 项 + 宿主契约检查 6 项（`npm test` 串跑）。
 - 已装入本机 desktop profile，在真实宿主里跑过 14 轮实测。
 - 实现刻意最小化，但核心机制与安全边界完整、有测试覆盖，仍然算 **demo**。
 
@@ -154,6 +154,34 @@ DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖�
 
 生效范围是**这个 preset 的所有会话**（新建的和老会话都算，老会话下一轮就带上），
 不需要逐会话开启。
+
+---
+
+## 0.4.8 诊断加固：收敛半边到底收不收得到事件
+
+真实压缩（`/compact`）之后，`compact_verify` **一直是 0 行** —— 而 `half=converge` 明明挂上了。
+两种可能，读码分不出来：
+
+1. preset 作用域里的 `agent/pre-step` 监听器**收不到**事件；
+2. 收得到，但它与根上那份**不是同一个模块实例**，`sessionStates` 互不可见。
+
+于是加三件可观测的自证（不改变原行为）：
+
+| 日志事件 | 含义 |
+|---|---|
+| `compact_guard_half half=converge-events` | 收敛半边**自己也**挂上了 `session/event`（可选依赖 `sessions`） |
+| `compact_converge_mark` | 该监听器**收到了** `compaction/end` 并记下标记（能收到 ⇒ 不再依赖根那份） |
+| `compact_preevent` | 该会话在本作用域里的**第一条** `agent/pre-step`，带 `flagged`（当时有没有标记）与 `messageTokens` |
+
+判读表：
+
+| 观测 | 结论 |
+|---|---|
+| 无 `converge-events` | 该作用域拿不到 `sessions` |
+| 有 `converge-events` 但无 `compact_converge_mark` | 会话事件**到不了** preset 作用域 |
+| 有 `compact_converge_mark` 但无 `compact_preevent` | `agent/pre-step` **到不了** preset 作用域 |
+| 有 `compact_preevent` 且 `flagged: true` | 事件与状态都通，收敛逻辑该跑而没跑 ⇒ 是逻辑缺陷 |
+| 有 `compact_preevent` 且 `flagged: false` | 两处**不是同一模块实例**（标记互不可见） |
 
 ---
 

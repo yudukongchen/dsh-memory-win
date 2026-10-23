@@ -1,4 +1,28 @@
 /**
+ * 触发某事件的所有监听器（假 ctx 的 `on` 现在按事件存**数组** —— 收敛半边 0.4.8 起
+ * 也会注册 `session/event`，一个事件多个监听器是常态，Map 单值会互相覆盖）。
+ *
+ * @param {Map} listeners - 监听器表。
+ * @param {string} event - 事件名。
+ * @param {...*} args - 载荷。
+ * @returns {void}
+ */
+/**
+ * 跑一遍 `agent/pre-step`（可能注册了多个监听器，按注册顺序 await）。
+ *
+ * @param {Map} listeners - 监听器表。
+ * @param {object} payload - 载荷。
+ * @param {Function} next - 继续链。
+ * @returns {Promise<void>} 完成。
+ */
+async function runPreStep(listeners, payload, next) {
+  for (const fn of listeners.get("agent/pre-step") ?? []) await fn(payload, next);
+}
+
+function emit(listeners, event, ...args) {
+  for (const fn of listeners.get(event) ?? []) fn(...args);
+}
+/**
  * 压缩守护（0.4.0）测试：备份命名/解码/保留策略，以及"守护"的接线与收敛规则。
  *
  * 两条纪律（都是本项目吃过亏的地方）：
@@ -307,8 +331,10 @@ function cordisLikeCtx({ declared = [], world = {}, listeners, unavailable = [] 
       return typeof dispose === "function" ? dispose : () => {};
     },
     on(event, listener) {
-      listeners.set(event, listener);
-      return () => listeners.delete(event);
+      const list = listeners.get(event) ?? [];
+      list.push(listener);
+      listeners.set(event, list);
+      return () => listeners.set(event, (listeners.get(event) ?? []).filter((fn) => fn !== listener));
     },
     inject(deps, callback) {
       const ready = deps.every((name) => world[name] !== undefined && !unavailable.includes(name));
@@ -378,7 +404,7 @@ function fakeGuardCtx(options = {}) {
         record.compactCalls.push({ start, end });
         record.events.push("compact:start");
         // 模拟宿主：压缩事务的第一件事就是追加 compaction/start（同一会话）。
-        listeners.get("session/event")?.(agent.session, {
+        emit(listeners, "session/event", agent.session, {
           type: "compaction/start",
           seq: 100,
           data: { compactionId: `self-${record.compactCalls.length}` },
@@ -433,8 +459,10 @@ test("守护：备份半边**不需要 compaction** 也能挂上（0.4.2 回归�
       return typeof dispose === "function" ? dispose : () => {};
     },
     on(event, listener) {
-      listeners.set(event, listener);
-      return () => listeners.delete(event);
+      const list = listeners.get(event) ?? [];
+      list.push(listener);
+      listeners.set(event, list);
+      return () => listeners.set(event, (listeners.get(event) ?? []).filter((fn) => fn !== listener));
     },
     // 富读取子作用域永远不就绪：三个可选服务一个都拿不到。
     inject() {
@@ -450,10 +478,10 @@ test("守护：备份半边**不需要 compaction** 也能挂上（0.4.2 回归�
   };
 
   registerCompactBackup(bareCtx);
-  assert.equal(typeof listeners.get("session/event"), "function", "备份半边必须只凭 sessions 就挂上");
+  assert.equal((listeners.get("session/event") ?? []).length, 1, "备份半边必须只凭 sessions 就挂上");
   assert.equal(listeners.has("agent/pre-step"), false, "备份半边不得注册收敛监听器");
 
-  listeners.get("session/event")(
+  emit(listeners, "session/event", 
     { id: sessionId },
     { type: "compaction/start", seq: 2, data: { compactionId: "c-only-sessions", turn: 1 } },
   );
@@ -475,7 +503,7 @@ test("守护：收敛半边只挂 agent/pre-step，且不依赖备份状态", as
   registerCompactConvergence(ctx);
 
   assert.equal(listeners.has("agent/pre-step"), true, "收敛半边必须挂上 pre-step");
-  assert.equal(listeners.has("session/event"), false, "收敛半边不得越界注册会话事件监听器");
+  assert.equal((listeners.get("session/event") ?? []).length >= 1, true, "0.4.8 起收敛半边自己也收会话事件（自给自足，不依赖根那份标记）");
   assert.equal(record.compactCalls.length, 0, "没观测到压缩就不该动手");
 });
 
@@ -488,7 +516,7 @@ test("守护：富读取半边接上后，标题来自 sessionTitle，落名用�
 
   const { backupCtx, listeners, record } = fakeGuardCtx({ title: "测试01" });
   registerCompactBackup(backupCtx);
-  listeners.get("session/event")({ id: sessionId }, { type: "compaction/start", seq: 2, data: { compactionId: "c-t" } });
+  emit(listeners, "session/event", { id: sessionId }, { type: "compaction/start", seq: 2, data: { compactionId: "c-t" } });
   await tick();
 
   assert.equal(record.flushes, 1);
@@ -507,7 +535,7 @@ test("守护：服务没有标题事件时退到标题投影（仍是会话名�
 
   const { backupCtx, listeners } = fakeGuardCtx({ titleExists: false, projectionTitle: "投影标题" });
   registerCompactBackup(backupCtx);
-  listeners.get("session/event")({ id: sessionId }, { type: "compaction/start", seq: 2, data: { compactionId: "c-p" } });
+  emit(listeners, "session/event", { id: sessionId }, { type: "compaction/start", seq: 2, data: { compactionId: "c-p" } });
   await tick();
 
   const names = readdirSync(join(backupRoot(), sessionId));
@@ -522,7 +550,7 @@ test("守护：三个服务都缺席时退到会话 id，并留下 titleFrom 证
 
   const { backupCtx, listeners } = fakeGuardCtx({ unavailable: ["sessionTitle", "tokenMeter", "sessionProjections"] });
   registerCompactBackup(backupCtx);
-  listeners.get("session/event")({ id: sessionId }, { type: "compaction/start", seq: 2, data: { compactionId: "c-f" } });
+  emit(listeners, "session/event", { id: sessionId }, { type: "compaction/start", seq: 2, data: { compactionId: "c-f" } });
   await tick();
 
   const names = readdirSync(join(backupRoot(), sessionId));
@@ -559,8 +587,8 @@ test("守护：两半边各自留一行 compact_guard_half（能不能装上要�
     .filter((row) => row.ev === "compact_guard_half");
   assert.deepEqual(
     rows.map((row) => row.half).sort(),
-    ["backup", "backup-enrich", "converge"],
-    "三行：备份半边、富读取半边、收敛半边；缺哪行就说明那部分没装上（web/desktop 上收敛半边预期缺席）",
+    ["backup", "backup-enrich", "converge", "converge-events"],
+    "四行：备份半边、富读取半边、收敛半边、收敛半边自己的事件监听；缺哪行就说明那部分没装上",
   );
 });
 
@@ -575,7 +603,7 @@ test("守护：compaction/start 触发备份，落点与命名符合规则", asy
   const { ctx, record, listeners } = fakeGuardCtx();
   registerCompactGuard(ctx);
 
-  listeners.get("session/event")(
+  emit(listeners, "session/event", 
     { id: sessionId },
     { type: "compaction/start", seq: 2, data: { compactionId: "c-9", turn: 3 } },
   );
@@ -596,8 +624,8 @@ test("守护：压缩后未超标则不补收敛", async () => {
   registerCompactGuard(ctx);
 
   const session = { id: "s1" };
-  listeners.get("session/event")(session, { type: "compaction/end", data: { compactionId: "c-1" } });
-  const preStep = listeners.get("agent/pre-step");
+  emit(listeners, "session/event", session, { type: "compaction/end", data: { compactionId: "c-1" } });
+  const preStep = (payload, next) => runPreStep(listeners, payload, next);
   let nextCalled = 0;
   await preStep({ agent: { session }, signal: { aborted: false } }, () => {
     nextCalled += 1;
@@ -613,8 +641,8 @@ test("守护：压缩后超标则补一次收敛，且同一周期只补一次",
   registerCompactGuard(ctx);
 
   const session = { id: "s1" };
-  const preStep = listeners.get("agent/pre-step");
-  listeners.get("session/event")(session, { type: "compaction/end", data: { compactionId: "c-1" } });
+  const preStep = (payload, next) => runPreStep(listeners, payload, next);
+  emit(listeners, "session/event", session, { type: "compaction/end", data: { compactionId: "c-1" } });
   await preStep({ agent: { session }, signal: { aborted: false } }, () => {});
 
   assert.equal(record.compactCalls.length, 1);
@@ -639,8 +667,8 @@ test("守护：本插件发起的收敛压缩不再触发备份", async () => {
   registerCompactGuard(ctx);
   const session = { id: sessionId };
 
-  listeners.get("session/event")(session, { type: "compaction/end", data: { compactionId: "c-1" } });
-  await listeners.get("agent/pre-step")({ agent: { session }, signal: { aborted: false } }, () => {});
+  emit(listeners, "session/event", session, { type: "compaction/end", data: { compactionId: "c-1" } });
+  await emit(listeners, "agent/pre-step", { agent: { session }, signal: { aborted: false } }, () => {});
   await tick();
 
   assert.equal(record.compactCalls.length, 1);
@@ -654,8 +682,8 @@ test("守护：配对失败时把区间尾部回收一个节点再试", async ()
   registerCompactGuard(ctx);
 
   const session = { id: "s1" };
-  listeners.get("session/event")(session, { type: "compaction/end", data: { compactionId: "c-1" } });
-  await listeners.get("agent/pre-step")({ agent: { session }, signal: { aborted: false } }, () => {});
+  emit(listeners, "session/event", session, { type: "compaction/end", data: { compactionId: "c-1" } });
+  await emit(listeners, "agent/pre-step", { agent: { session }, signal: { aborted: false } }, () => {});
 
   assert.equal(record.compactCalls.length, 2);
   assert.deepEqual(record.compactCalls[0], { start: 11, end: 12 });
@@ -675,8 +703,8 @@ test("守护：compaction/end 带 error 时不参与收敛", async () => {
   registerCompactGuard(ctx);
   const session = { id: "s1" };
 
-  listeners.get("session/event")(session, { type: "compaction/end", data: { compactionId: "c-1", error: "summarizer failed" } });
-  await listeners.get("agent/pre-step")({ agent: { session }, signal: { aborted: false } }, () => {});
+  emit(listeners, "session/event", session, { type: "compaction/end", data: { compactionId: "c-1", error: "summarizer failed" } });
+  await emit(listeners, "agent/pre-step", { agent: { session }, signal: { aborted: false } }, () => {});
   assert.equal(record.compactCalls.length, 0);
 });
 
