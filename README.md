@@ -2,7 +2,7 @@
 
 DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖、不走 shell、不调用模型。
 
-- 版本 **0.4.5**，单测 **213 例**（`node test/run.mjs`）+ 真实 Cordis 生命周期回归 + 客户端冒烟 33 项 + 宿主契约检查 6 项（`npm test` 串跑）。
+- 版本 **0.4.6**，单测 **213 例**（`node test/run.mjs`）+ 真实 Cordis 生命周期回归 + 客户端冒烟 33 项 + 宿主契约检查 6 项（`npm test` 串跑）。
 - 已装入本机 desktop profile，在真实宿主里跑过 14 轮实测。
 - 实现刻意最小化，但核心机制与安全边界完整、有测试覆盖，仍然算 **demo**。
 
@@ -157,29 +157,41 @@ DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖�
 
 ---
 
-## 0.4.5 部署变更：preset-cordis 整段覆盖（本机 desktop profile）
+## 0.4.5 / 0.4.6 部署变更：把收敛半边挂进**你实际在用的** preset
 
 压缩守护的**收敛半边**要挂进 agent preset 的 compaction 组才拿得到 `compaction` 服务，
 而 preset 内部的行**打不中 id 补丁**（详见 §2.8 与 `tools/verify-preset-patches.mjs`），
-所以只能整段覆盖 `preset-cordis` 那一行。生成方式（不是手抄）：
+所以只能整段覆盖对应的 `preset-*` 行。生成方式（不是手抄）：
 
 ```bash
-node tools/gen-preset-override.mjs        # → .scratch/preset-cordis-override.yml（164 行）
-node tools/verify-preset-patches.mjs      # 叠加后看清落点：只有 cordis 变
+# 1) 先确认**你实际在用**哪个 preset —— 别猜：
+#    会话投影的 agentPreset + profile 里 agent-preset-registry 的 selectedDefault
+node tools/gen-preset-override.mjs --preset preset-standard
+node tools/verify-preset-patches.mjs      # 叠加后看清落点：只有那一个 preset 变
 ```
+
+> ⚠️ **0.4.5 曾把 preset 选错。** 当时只看了**一个会话**的投影（那一刻它是 `cordis`）就
+> 断定"desktop 会话用 cordis"，而本机实际是 `standard`：`agent-preset-registry.selectedDefault
+> = standard`，且 95 个会话里 **94 个 standard、1 个 cordis**。后果是收敛半边挂在了几乎没人
+> 用的 preset 上 —— 表面全绿（`half=converge` 确实出现），实际没兜住任何常用会话。
+> 教训：**preset 归属要看"默认选择 + 会话分布"，不能看单个会话**（会话中途还能切换 preset）。
+> 0.4.6 已改为覆盖 `preset-standard`。
 
 生成的覆盖只改两处：`compaction` 组里 `compaction-basic` 的
 `thresholdRatio: 0.75 / retainTokens: 8000 / maxTokens: 8000`，以及追加一行
 `dsh-memory-win-converge`（`name: 'dsh-memory-win'` + `config: { convergeOnly: true }`）。
 
-⚠️ **代价：整段覆盖把该 preset 钉在生成时的定义上。** 宿主升级后若改了
-`presets/cordis.patch.yml`（文案、工具行、隔离项…），你的覆盖会把它盖回旧版且**不报错**。
-**升级后重跑一次生成器再覆盖**即可 —— 基线永远取自当前宿主的源定义，不会把旧内容滚进去。
-profile 里的段落上方也写了这句提醒；改前备份保留在
-`cordis.patch.yml.bak-<时间戳>`。
+⚠️ **代价一：只覆盖一个 preset。** 其它 preset（`cordis` / `ptc`）没有收敛兜底 ——
+改用哪个就为哪个重新生成。备份半边不受影响（它在根作用域，全会话通用）。
+
+⚠️ **代价二：整段覆盖把该 preset 钉在生成时的定义上。** 宿主升级后若改了
+`presets/<name>.patch.yml`，你的覆盖会把它盖回旧版且**不报错**。**升级后重跑生成器**
+即可 —— 基线永远取自当前宿主的源定义，不会把旧内容滚进去。改前备份保留在
+`cordis.patch.yml.bak-<时间戳>` 与 `cordis.patch.yml.bak2-<时间戳>`。
 
 验收：重启后效果日志出现 `compact_guard_half half=converge`（三条全齐：
-`backup` / `backup-enrich` / `converge`），且压缩触发点从 800k 提前到 750k。
+`backup` / `backup-enrich` / `converge`）；`half=converge` **每次 preset 实例化写一行**，
+所以行数会随会话数增长，不是重复挂载。
 
 ---
 
