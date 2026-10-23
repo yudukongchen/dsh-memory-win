@@ -189,20 +189,58 @@ summary is not smaller than the shadowed content (5551 >= 5551)
 
 ### 二、收敛判据改成"看表层"（不再依赖跨挂载状态）
 
-0.4.8 的三件自证给出了实测结论：
-
-| 观测 | 结果 | 结论 |
-|---|---|---|
-| `half=converge-events` | 有 | preset 作用域**拿得到** `sessions` |
-| `compact_converge_mark` | **无** | 该作用域**收不到会话事件** |
-| `compact_preevent` | 有（`flagged:false`） | `agent/pre-step` **到得了**该作用域 |
-
-⇒ "根半边记标记、preset 半边读标记"这条路只能靠"两份是同一模块实例"成立，而那不是可验证的契约。
-现在改成**表层自证**：压缩成功后，表层第一个非 `system/message` 节点就是承载摘要的
-`user/message`，其 `source.kind === "compact-checkpoint"` 且带 `compactionId` ——
-读得到 ⇒ 这个会话压过；**每枚检查点只补压一次**（我们自己也压出检查点时会把它记下，避免自激）。
+0.4.8 的三件自证**一度**给出"preset 作用域收不到会话事件"的结论 —— **该结论已被实测推翻**
+（复盘见本节 §四）。但无论那条链通不通，收敛判据都不该建立在"两个作用域是不是同一模块实例"
+这种无法验证的假设上，所以现在改成**表层自证**：压缩成功后，表层第一个非 `system/message`
+节点就是承载摘要的 `user/message`，其 `source.kind === "compact-checkpoint"` 且带
+`compactionId` —— 读得到 ⇒ 这个会话压过；**每枚检查点只补压一次**（我们自己也压出检查点时
+会把它记下，避免自激）。
 
 这条判据完全不依赖会话事件与跨挂载状态，两个作用域各自都能判定。
+
+### 三、全链路实测闭环（2026-10-23 15:22，会话 `session-1c5653e5`）
+
+该会话手动 `/compact`（当时 `totalTokens=595014`），宿主回报
+`Compacted 951 history items (~451884 tokens).`。效果日志按时间顺序：
+
+| 时刻 | 日志事件 | 含义 |
+|---|---|---|
+| 15:22:44 | `compact_backup ok=true base=会话上下文自动压缩需求_20261023_152244 totalTokens=595014 titleFrom=service` | 压缩**前**已备份（三件套齐全） |
+| 15:26:35 | `compact_converge_mark via=converge-half compactionId=f7282a84…` | preset 作用域**收到了** `compaction/end` |
+| 15:31:17 | `compact_preevent flagged=true messageTokens=4123` | 下一条 `agent/pre-step` 到了该作用域，且**标记可见** |
+| 15:31:17 | `compact_verify ok=true via=checkpoint messageTokens=4123 target=16000` | 表层判据命中；4123 ≤ 16000，**无需补压** |
+
+`compact_converge` 为 0 行是**正确**的（压后已达标）。
+
+### 四、误判复盘：`compact_converge_mark` 的"0 行"不是"收不到事件"
+
+0.4.8 的自证窗口（13:36:42 → 15:21:50）里 `compact_converge_mark` 确实是 0 行，但它**不等于**
+"事件到不了 preset 作用域"，而等于"那段时间没有一次**成功**的压缩"：
+
+| 时刻 | 压缩结果 |
+|---|---|
+| 14:28:12 / 14:43:30 / 14:43:44 / 15:19:36 / 15:22:35 | **失败**：`no adapter registered for provider "qodercn"` 或 `"our-free-model"` |
+| 14:29:05 | **失败**：`summary is not smaller than the shadowed content` |
+
+收敛半边对 `compaction/end` 的处理是**先判 `data.error` 再记标记**（失败不置标记是设计），
+所以五次失败一次都没写 `converge_mark`；而窗口内唯一"成功"的 10:27 那次发生在 `converge-events`
+注册（13:36:42）**之前**。样本里根本没有"成功的压缩"，却据此下了"收不到事件"的结论 ——
+**以"没有观测到"当作"不存在"**，这就是误判的成因。教训：自证事件要连**否定样本**
+（失败/无事件）一起读，别只看有没有那一行。
+
+### 五、顺带确认的两条宿主事实
+
+1. **手动 `/compact` 只保留最后 1 个节点**：`dsh-compaction-basic` 的
+   `compactNow()` 调用 `selectCompactableRange(session, measure(session), 0)` —— 第三参
+   `retainTokens` 是**字面量 `0`**，于是"保留最近尾部"循环第一次就满足，只留最后一个表层节点。
+   本次实测正是如此：表层被替换的区间是 `seq 9..3027`，只留下 `seq 3028`（一条 assistant/message）。
+   所以**`retainTokens` 配置只作用于阈值触发的自动压缩**，对手动 `/compact` 无效 ——
+   这解释了"手动压完 `messageTokens` 只剩 4123"（摘要 ≈ 3.7k + 1 个节点）。
+2. **`messageTokens` 的口径**：`dsh-token-meter` 里 `messageTokens = max(0, surfaceTokens − systemTokens)`，
+   即**除系统提示词以外的全部可见表层**（**含工具结果**，**不含**工具定义 —— 后者另计
+   `toolsTokens`）。宿主自己的阈值判定用的是 `measurement.totalTokens`（系统 + 工具定义 + 表层），
+   所以"750k 触发"针对的是 `totalTokens`，而本插件的 `compactTargetTokens` 针对 `messageTokens`，
+   两者口径不同、不可直接比较。
 
 ---
 
@@ -266,6 +304,11 @@ summary is not smaller than the shadowed content (5551 >= 5551)
 | 有 `compact_converge_mark` 但无 `compact_preevent` | `agent/pre-step` **到不了** preset 作用域 |
 | 有 `compact_preevent` 且 `flagged: true` | 事件与状态都通，收敛逻辑该跑而没跑 ⇒ 是逻辑缺陷 |
 | 有 `compact_preevent` 且 `flagged: false` | 两处**不是同一模块实例**（标记互不可见） |
+
+> ⚠️ **2026-10-23 修订**：上表第二行的判读**不成立**。`compact_converge_mark` 为 0 行还可能只是
+> "窗口内没有一次**成功**的压缩"——收敛半边对 `compaction/end` 是先判 `data.error` 再记标记，
+> 失败不置标记是设计。带成功样本重测后，该监听器**确实收到了** `compaction/end`。
+> 详见 0.4.10 一节 §四「误判复盘」。
 
 ---
 
