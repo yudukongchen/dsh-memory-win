@@ -729,3 +729,43 @@ test("配置：压缩守护新增键的默认值与类型校验", () => {
   // 空串是合法值（= 用默认落点）
   assert.equal(normalizeConfig({ compactBackupDir: "" }).compactBackupDir, "");
 });
+
+test("守护：表层有压缩检查点时，不依赖会话事件也能补压（0.4.10）", async () => {
+  arm();
+  const { ctx, record, listeners, state } = fakeGuardCtx({ messageTokens: 60000, afterTokens: 3000 });
+  registerCompactGuard(ctx);
+
+  // 会话：表层第一个非 system 节点是检查点（模拟"刚压过"），且**故意不发任何
+  // compaction/end 事件** —— 0.4.8 的诊断实测表明 preset 作用域收不到会话事件，
+  // 所以收敛判据必须能从表层自证。
+  const session = {
+    id: "s-ckpt",
+    surface: { nodes: [10, 11, 12, 13] },
+    eventAt: (seq) =>
+      seq === 11
+        ? { type: "user/message", data: { source: { kind: "compact-checkpoint", compactionId: "cp-1" } } }
+        : { type: "system/message" },
+  };
+  const preStep = (payload, next) => runPreStep(listeners, payload, next);
+
+  await preStep({ agent: { session }, signal: { aborted: false } }, () => {});
+  assert.equal(record.compactCalls.length, 1, "只凭表层检查点就该补一次");
+  assert.equal(state.messageTokens, 3000, "补压后消息历史应回落");
+
+  // 同一枚检查点：不再补（每枚检查点只补一次，避免自激循环）
+  await preStep({ agent: { session }, signal: { aborted: false } }, () => {});
+  assert.equal(record.compactCalls.length, 1);
+});
+
+test("守护：没有检查点、也没有标记时，pre-step 不动手", async () => {
+  arm();
+  const { ctx, record, listeners } = fakeGuardCtx({ messageTokens: 60000 });
+  registerCompactGuard(ctx);
+  const session = {
+    id: "s-plain",
+    surface: { nodes: [10, 11] },
+    eventAt: () => ({ type: "user/message", data: { source: { kind: "user" } } }),
+  };
+  await runPreStep(listeners, { agent: { session }, signal: { aborted: false } }, () => {});
+  assert.equal(record.compactCalls.length, 0);
+});

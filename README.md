@@ -2,7 +2,7 @@
 
 DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖、不走 shell、不调用模型。
 
-- 版本 **0.4.9**，单测 **213 例**（`node test/run.mjs`）+ 真实 Cordis 生命周期回归 + 客户端冒烟 33 项 + 宿主契约检查 6 项（`npm test` 串跑）。
+- 版本 **0.4.10**，单测 **213 例**（`node test/run.mjs`）+ 真实 Cordis 生命周期回归 + 客户端冒烟 33 项 + 宿主契约检查 6 项（`npm test` 串跑）。
 - 已装入本机 desktop profile，在真实宿主里跑过 14 轮实测。
 - 实现刻意最小化，但核心机制与安全边界完整、有测试覆盖，仍然算 **demo**。
 
@@ -154,6 +154,55 @@ DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖�
 
 生效范围是**这个 preset 的所有会话**（新建的和老会话都算，老会话下一轮就带上），
 不需要逐会话开启。
+
+---
+
+## 0.4.10 两件事：`/compact` 报"摘要没用"的归因 + 收敛判据改成看表层
+
+### 一、`Compaction could not produce a useful summary.` 是什么
+
+这是**宿主**的拒绝，不是守护引入的。会话日志里那条 `compaction/end` 的原文是：
+
+```
+summary is not smaller than the shadowed content (2017 estimated framed tokens >= 2008)
+```
+
+配套事实：`shadowed=2015`、`maxTokens=8000`、摘要实际输出 `outputTokens=2246`。
+
+也就是说：这个会话（标题「测试01」）在 10:27 已经压过一次，历史只剩 **≈2.2k tokens**；
+而宿主的检查点摘要（固定 8 段模板）本身就 ~2k ⇒ **摘要不可能比被压内容更小**，宿主如实拒绝。
+它失败得很干净：**会话历史一字未动**。
+
+**同样错误在宿主默认配置下也出现过**（10-22 05:38 某会话，`maxTokens` 为默认 65536）：
+
+```
+summary is not smaller than the shadowed content (4330 >= 4326)
+summary is not smaller than the shadowed content (5551 >= 5551)
+```
+
+⇒ 这是"在本来就没多少可压的会话上手动 /compact"的固有行为。
+
+我们的配置只贡献了一点：`maxTokens: 8000` 让摘要能写到 8k，对 2k 的输入当然不会更小。
+想让小会话的手动 `/compact` 也成功，可以把 `maxTokens` 压到 2000–3000；**代价**是大范围摘要
+更容易被截断（日志里已有 `summarization truncated at the token cap` 先例）。建议：手动 `/compact`
+用在对**确有历史**的会话上，小会话本来就无可压。
+
+### 二、收敛判据改成"看表层"（不再依赖跨挂载状态）
+
+0.4.8 的三件自证给出了实测结论：
+
+| 观测 | 结果 | 结论 |
+|---|---|---|
+| `half=converge-events` | 有 | preset 作用域**拿得到** `sessions` |
+| `compact_converge_mark` | **无** | 该作用域**收不到会话事件** |
+| `compact_preevent` | 有（`flagged:false`） | `agent/pre-step` **到得了**该作用域 |
+
+⇒ "根半边记标记、preset 半边读标记"这条路只能靠"两份是同一模块实例"成立，而那不是可验证的契约。
+现在改成**表层自证**：压缩成功后，表层第一个非 `system/message` 节点就是承载摘要的
+`user/message`，其 `source.kind === "compact-checkpoint"` 且带 `compactionId` ——
+读得到 ⇒ 这个会话压过；**每枚检查点只补压一次**（我们自己也压出检查点时会把它记下，避免自激）。
+
+这条判据完全不依赖会话事件与跨挂载状态，两个作用域各自都能判定。
 
 ---
 
