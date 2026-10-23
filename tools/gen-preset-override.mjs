@@ -34,6 +34,7 @@ import {
   composeLayers,
   deepEqualWithJs,
   findPresetInsert,
+  hostModules,
   loadPatches,
   presetRowsOf,
   yamlToolkit,
@@ -82,6 +83,7 @@ if (composed === undefined) {
   console.error(`组合树里没有 ${presetId}；现有：${presets.map((entry) => entry.id).join(", ") || "（无）"}`);
   process.exit(1);
 }
+console.log(`宿主模块根   ${hostModules().root}（${hostModules().how}）`);
 console.log("基线来源（bundle → 源）：");
 for (const row of sources) console.log(`  ${row.bundle.padEnd(28)} ${row.label}`);
 if (composeWarnings.length > 0) {

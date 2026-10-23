@@ -27,7 +27,7 @@
 
 import { resolve } from "node:path";
 
-import { composeLayers, presetRowsOf } from "./lib/compose.mjs";
+import { composeLayers, hostModules, presetRowsOf } from "./lib/compose.mjs";
 
 /** 取命令行开关。 */
 function argOf(argv, key) {
@@ -46,6 +46,7 @@ const { data, warnings, sources, profileDir, userPatches } = await composeLayers
 });
 
 console.log(`profile      ${profileName}  (${profileDir})`);
+console.log(`宿主模块根   ${hostModules().root}（${hostModules().how}）`);
 console.log(
   `用户 patch   cordis.patch.yml（${userPatches.length} 条）` +
     (extraPatch === undefined ? "" : ` + ${resolve(extraPatch)}（预演）`),

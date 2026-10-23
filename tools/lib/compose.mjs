@@ -28,19 +28,127 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-/** 宿主 `@deepseek-ai/*` 包的本地独立安装位置（asar 不可用时的兜底）。 */
-export const DSH_MODULES = "D:/Program Files/nodejs/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai";
+/**
+ * 宿主 `@deepseek-ai/*` 包与 `js-yaml` 所在的**模块根**。
+ *
+ * ## 为什么不能写死（0.4.9 修）
+ *
+ * 这里原先写死了 `D:/Program Files/nodejs/node_modules/...` —— Windows 上能跑，
+ * Linux/macOS 直接报"找不到宿主的 cordis-plugin-include"（同事这次是拿软链垫过去的）。
+ * 现在改成**推导 + 环境变量兜底**：
+ *
+ * | 顺序 | 来源 |
+ * |---|---|
+ * | 1 | `DSH_HOST_MODULES`（显式指定，最高优先） |
+ * | 2 | `process.execPath` 推导：同级 `node_modules`、上级 `lib/node_modules`、上级 `node_modules` |
+ * | 3 | 平台常见全局前缀（`%APPDATA%/npm`、`%ProgramFiles%/nodejs`、`/usr/local/lib`、`/opt/homebrew/lib`、`~/.nvm/versions/node/*`…） |
+ *
+ * 每个候选根再试三种"形状"：根本身、`<root>/@deepseek-ai/dsh/node_modules`、
+ * `<root>/dsh/node_modules` —— 因为 `dsh` 这个包既可以全局装、也可以嵌在别处。
+ * 判定标准是**同时**存在 `@deepseek-ai/cordis-plugin-include/package.json` 与
+ * `js-yaml/package.json`（本工具的两个真依赖）；全都找不到时抛出**列出所有候选**的错误，
+ * 而不是静默回落 —— 跨平台脚本最怕的就是"看起来跑了"。
+ *
+ * @returns {{root:string, how:string}} 模块根与它是怎么被找到的。
+ * @throws {Error} 全部候选都不成立时抛出（消息里列出试过的路径）。
+ */
+export function hostModules() {
+  const tried = [];
+  const roots = [];
 
-/** 桌面版 app.asar 的默认位置。 */
-export const APP_ASAR = join(
-  homedir(),
-  "AppData",
-  "Local",
-  "Programs",
-  "DeepSeek Harness",
-  "resources",
-  "app.asar",
-);
+  const envRoot = process.env.DSH_HOST_MODULES;
+  if (typeof envRoot === "string" && envRoot.trim() !== "") {
+    roots.push({ root: resolve(envRoot.trim()), how: "DSH_HOST_MODULES" });
+  }
+
+  const execDir = dirname(process.execPath);
+  roots.push(
+    { root: join(execDir, "node_modules"), how: "process.execPath 同级 node_modules" },
+    { root: join(execDir, "..", "lib", "node_modules"), how: "process.execPath 上级 lib/node_modules" },
+    { root: join(execDir, "..", "node_modules"), how: "process.execPath 上级 node_modules" },
+  );
+
+  const env = process.env;
+  if (typeof env.APPDATA === "string" && env.APPDATA !== "") {
+    roots.push({ root: join(env.APPDATA, "npm", "node_modules"), how: "%APPDATA%/npm/node_modules" });
+  }
+  for (const key of ["ProgramFiles", "ProgramFiles(x86)"]) {
+    if (typeof env[key] === "string" && env[key] !== "") {
+      roots.push({ root: join(env[key], "nodejs", "node_modules"), how: `%${key}%/nodejs/node_modules` });
+    }
+  }
+  for (const fixed of [
+    "/usr/local/lib/node_modules",
+    "/usr/lib/node_modules",
+    "/usr/lib64/node_modules",
+    "/opt/homebrew/lib/node_modules",
+  ]) {
+    roots.push({ root: fixed, how: fixed });
+  }
+  try {
+    const nvmRoot = join(homedir(), ".nvm", "versions", "node");
+    for (const version of readdirSync(nvmRoot)) {
+      roots.push({ root: join(nvmRoot, version, "lib", "node_modules"), how: `~/.nvm/versions/node/${version}` });
+    }
+  } catch {
+    /* 没有 nvm 就走别的候选 */
+  }
+
+  for (const candidate of roots) {
+    for (const shape of [
+      { root: candidate.root, suffix: "" },
+      { root: join(candidate.root, "@deepseek-ai", "dsh", "node_modules"), suffix: " → @deepseek-ai/dsh/node_modules" },
+      { root: join(candidate.root, "dsh", "node_modules"), suffix: " → dsh/node_modules" },
+    ]) {
+      tried.push(shape.root);
+      const ok =
+        existsSync(join(shape.root, "@deepseek-ai", "cordis-plugin-include", "package.json")) &&
+        existsSync(join(shape.root, "js-yaml", "package.json"));
+      if (ok) return { root: shape.root, how: `${candidate.how}${shape.suffix}` };
+    }
+  }
+
+  throw new Error(
+    [
+      "找不到宿主的模块根（需要同时有 @deepseek-ai/cordis-plugin-include 与 js-yaml）。",
+      "试过：",
+      ...tried.map((path) => `  · ${path}`),
+      "用 DSH_HOST_MODULES=<模块根> 显式指定即可（例如 `npm root -g` 下 `@deepseek-ai/dsh/node_modules`）。",
+    ].join("\n"),
+  );
+}
+
+/**
+ * 桌面版 app.asar 的候选位置（跨平台）。
+ *
+ * 只做"存在性"筛选；调用方拿第一个存在的。`DSH_APP_ASAR` 永远最高优先。
+ *
+ * @returns {string[]} 候选路径。
+ */
+export function appAsarCandidates() {
+  const out = [];
+  if (typeof process.env.DSH_APP_ASAR === "string" && process.env.DSH_APP_ASAR !== "") {
+    out.push(process.env.DSH_APP_ASAR);
+  }
+  const env = process.env;
+  if (typeof env.LOCALAPPDATA === "string" && env.LOCALAPPDATA !== "") {
+    out.push(join(env.LOCALAPPDATA, "Programs", "DeepSeek Harness", "resources", "app.asar"));
+  }
+  out.push(
+    "/Applications/DeepSeek Harness.app/Contents/Resources/app.asar",
+    join(homedir(), "Applications", "DeepSeek Harness.app", "Contents", "Resources", "app.asar"),
+    "/opt/DeepSeek Harness/resources/app.asar",
+    "/opt/deepseek-harness/resources/app.asar",
+    "/usr/lib/deepseek-harness/resources/app.asar",
+    join(homedir(), ".local", "share", "DeepSeek Harness", "resources", "app.asar"),
+  );
+  return out;
+}
+
+/** 第一个存在的 app.asar（没有则 `undefined`）。 */
+export function defaultAppAsar() {
+  return appAsarCandidates().find((path) => existsSync(path));
+}
 
 /** asar 内宿主包的根（asar 根下就是 `dsh/`）。 */
 const ASAR_DSH_ROOT = "dsh";
@@ -63,7 +171,7 @@ export class JsExpr {
  * @param {string} [archive] - asar 路径。
  * @returns {{label:string, readText:(rel:string)=>string|undefined, list:(dir:string)=>string[], close:()=>void}|undefined} 读取器。
  */
-export function openAsarReader(archive = process.env.DSH_APP_ASAR ?? APP_ASAR) {
+export function openAsarReader(archive = defaultAppAsar()) {
   if (typeof archive !== "string" || !existsSync(archive)) return undefined;
   const fd = openSync(archive, "r");
   let tree;
@@ -116,7 +224,7 @@ let yamlLib;
  */
 export async function yamlToolkit() {
   if (yamlLib === undefined) {
-    const mod = await import(pathToFileURL(join(DSH_MODULES, "..", "js-yaml", "index.js")).href);
+    const mod = await import(pathToFileURL(join(hostModules().root, "js-yaml", "index.js")).href);
     const yaml = mod.default ?? mod;
     const type = new yaml.Type("tag:yaml.org,2002:js", {
       kind: "scalar",
@@ -210,7 +318,7 @@ export function resolveBundleSource({ profileDir, bundleName, asar }) {
   }
   const profilePath = join(profileDir, "node_modules", bundleName);
   if (existsSync(join(profilePath, "package.json"))) candidates.push(dirSource(profilePath, "profile"));
-  const installPath = join(dirname(DSH_MODULES), bundleName);
+  const installPath = join(hostModules().root, bundleName);
   if (existsSync(join(installPath, "package.json"))) candidates.push(dirSource(installPath, "install"));
 
   if (candidates.length === 0) return { source: undefined, shadow: undefined, warnings };
@@ -264,7 +372,7 @@ export function bundlePatchPaths(source) {
 export async function composeLayers(options = {}) {
   const { profileName = "desktop", withUserPatch = false, extraPatches = [] } = options;
 
-  const includeFile = join(DSH_MODULES, "cordis-plugin-include", "lib", "index.js");
+  const includeFile = join(hostModules().root, "@deepseek-ai", "cordis-plugin-include", "lib", "index.js");
   if (!existsSync(includeFile)) throw new Error(`找不到宿主的 cordis-plugin-include：${includeFile}`);
   const { applyEntryPatches } = await import(pathToFileURL(includeFile).href);
 

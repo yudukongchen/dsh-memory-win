@@ -2,7 +2,7 @@
 
 DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖、不走 shell、不调用模型。
 
-- 版本 **0.4.8**，单测 **213 例**（`node test/run.mjs`）+ 真实 Cordis 生命周期回归 + 客户端冒烟 33 项 + 宿主契约检查 6 项（`npm test` 串跑）。
+- 版本 **0.4.9**，单测 **213 例**（`node test/run.mjs`）+ 真实 Cordis 生命周期回归 + 客户端冒烟 33 项 + 宿主契约检查 6 项（`npm test` 串跑）。
 - 已装入本机 desktop profile，在真实宿主里跑过 14 轮实测。
 - 实现刻意最小化，但核心机制与安全边界完整、有测试覆盖，仍然算 **demo**。
 
@@ -154,6 +154,41 @@ DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖�
 
 生效范围是**这个 preset 的所有会话**（新建的和老会话都算，老会话下一轮就带上），
 不需要逐会话开启。
+
+---
+
+## 0.4.9 跨平台修复：工具里不再写死宿主路径
+
+`tools/lib/compose.mjs` 原先把宿主模块根写死成
+`D:/Program Files/nodejs/node_modules/@deepseek-ai/dsh` —— Windows 上能跑，
+**Linux/macOS 直接报"找不到宿主的 cordis-plugin-include"**（有人是拿软链垫过去的）。
+
+现在按下面的顺序解析（`hostModules()`），并把结果打在两个工具的输出里：
+
+| 顺序 | 来源 |
+|---|---|
+| 1 | `DSH_HOST_MODULES`（显式指定，最高优先） |
+| 2 | `process.execPath` 推导：同级 `node_modules`、上级 `lib/node_modules`、上级 `node_modules` |
+| 3 | 平台常见全局前缀：`%APPDATA%/npm`、`%ProgramFiles%/nodejs`、`/usr/local/lib`、`/usr/lib`、`/opt/homebrew/lib`、`~/.nvm/versions/node/*/lib` |
+
+每个候选根还会试三种形状（根本身、`<root>/@deepseek-ai/dsh/node_modules`、`<root>/dsh/node_modules`），
+判定标准是**同时**存在 `@deepseek-ai/cordis-plugin-include` 与 `js-yaml`。
+全都不成立时**抛出列全部候选的错误**（而不是静默回落）—— 跨平台脚本最怕"看起来跑了"：
+
+```
+找不到宿主的模块根（需要同时有 @deepseek-ai/cordis-plugin-include 与 js-yaml）。
+试过：
+  · /nonexistent/host
+  · /nonexistent/host/@deepseek-ai/dsh/node_modules
+  ...
+用 DSH_HOST_MODULES=<模块根> 显式指定即可（例如 `npm root -g` 下 `@deepseek-ai/dsh/node_modules`）。
+```
+
+`app.asar` 的默认位置也一并跨平台化（`DSH_APP_ASAR` → `%LOCALAPPDATA%` → `/Applications/...` →
+`/opt/...` → `~/.local/share/...`）。`DSH_HOST_MODULES` / `DSH_APP_ASAR` 两个环境变量在所有平台上都是最高优先。
+
+> 注：`tools/` 不在 npm tarball 里（`package.json.files` 只含 `index.js`/`lib`/`patch`/`README`/`LICENSE`），
+> 所以这条修复只影响从**仓库**跑工具的人，不影响插件本体。
 
 ---
 
