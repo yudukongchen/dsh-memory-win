@@ -2,7 +2,7 @@
 
 DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖、不走 shell、不调用模型。
 
-- 版本 **0.4.6**，单测 **213 例**（`node test/run.mjs`）+ 真实 Cordis 生命周期回归 + 客户端冒烟 33 项 + 宿主契约检查 6 项（`npm test` 串跑）。
+- 版本 **0.4.7**，单测 **213 例**（`node test/run.mjs`）+ 真实 Cordis 生命周期回归 + 客户端冒烟 33 项 + 宿主契约检查 6 项（`npm test` 串跑）。
 - 已装入本机 desktop profile，在真实宿主里跑过 14 轮实测。
 - 实现刻意最小化，但核心机制与安全边界完整、有测试覆盖，仍然算 **demo**。
 
@@ -154,6 +154,37 @@ DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖�
 
 生效范围是**这个 preset 的所有会话**（新建的和老会话都算，老会话下一轮就带上），
 不需要逐会话开启。
+
+---
+
+## 0.4.7 修复说明：整段覆盖把宿主已删除的 `{{cwd}}` 写了回去（D10）
+
+0.4.5/0.4.6 生成 preset 覆盖时，基线取自**本地独立安装**的宿主副本
+（`D:/Program Files/nodejs/node_modules/@deepseek-ai/dsh`）。那份副本与 app.asar
+**同版本号但内容可以不同**：宿主把 `presets/standard.patch.yml` 里 persona 的
+`suffix: Your working directory is {{cwd}}.` 删掉之后，本地副本一度还是旧的，于是生成的覆盖
+**把 `suffix` 连同 `{{cwd}}` 又写回去了**。宿主对提示词变量是严格插值（未知变量直接抛），
+于是每一轮都失败：
+
+```
+unknown prompt variable "{{cwd}}" in section "deployment:persona-suffix";
+registered variables: provider, model
+```
+
+这正是"整段覆盖 = 把 preset 钉在生成时的定义上"那条已知代价的**变体**：钉住的还是**过期的替身**。
+
+修法两条：
+
+1. **基线优先级改为 app.asar 优先**：`app.asar`（宿主真正加载的）→ profile 的 `node_modules`
+   → 本地独立安装；`tools/lib/compose.mjs` 里统一实现，两个工具共用。
+2. **影子源逐文件比对**：asar 与本地副本的每个 patch 文件做**文本比较**（只比版本号抓不到 ——
+   本次两边都是 `0.2.1-rc.2`），不一致就告警并把 asar 标为权威。
+
+重新生成后 `preset-standard` 从"19 子项 / 160 行"变成 **"22 子项 / 141 行"**，persona 段只剩
+`prefix: … {{model}} …`，与 asar 一致。
+
+> 附注：本插件自身**从不使用 `{{cwd}}` 或任何提示词变量**（它的注入段是代码里拼的字符串），
+> 所以这个故障完全来自 preset 覆盖，不是插件本体。
 
 ---
 

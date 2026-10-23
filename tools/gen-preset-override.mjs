@@ -31,10 +31,9 @@ import { dirname, join, resolve } from "node:path";
 
 import {
   JsExpr,
-  bundleDir,
-  bundlePatches,
   composeLayers,
   deepEqualWithJs,
+  findPresetInsert,
   loadPatches,
   presetRowsOf,
   yamlToolkit,
@@ -76,34 +75,27 @@ const withConverge = !argv.includes("--no-converge");
 const outFile = resolve(argOf(argv, "out") ?? join(".scratch", `${presetId}-override.yml`));
 
 // ── 组合树（**不含**用户 patch：否则会把自己上次的补丁当基线，越生成越大）──────────
-const { data, profileDir } = await composeLayers({ withUserPatch: false });
+const { data, profileDir, warnings: composeWarnings, sources } = await composeLayers({ withUserPatch: false });
 const presets = presetRowsOf(data);
 const composed = presets.find((entry) => entry.id === presetId);
 if (composed === undefined) {
   console.error(`组合树里没有 ${presetId}；现有：${presets.map((entry) => entry.id).join(", ") || "（无）"}`);
   process.exit(1);
 }
+console.log("基线来源（bundle → 源）：");
+for (const row of sources) console.log(`  ${row.bundle.padEnd(28)} ${row.label}`);
+if (composeWarnings.length > 0) {
+  console.log("⚠️ 源一致性告警：");
+  for (const line of composeWarnings) console.log(`  · ${line}`);
+}
 
 // ── 基线：回到**源 patch 文件**取（保住 !!js）────────────────────────────────
-const profilePkg = JSON.parse(
-  (await import("node:fs")).readFileSync(join(profileDir, "package.json"), "utf8"),
-);
-let source;
-for (const bundleName of profilePkg?.dsh?.profile?.bundles ?? []) {
-  const pkgDir = bundleDir(profileDir, bundleName);
-  if (pkgDir === undefined) continue;
-  for (const patchFile of bundlePatches(pkgDir)) {
-    for (const patch of await loadPatches(patchFile)) {
-      for (const entry of patch?.insert && Array.isArray(patch.insert) ? patch.insert : []) {
-        if (entry?.id === presetId) source = { entry, patchFile };
-      }
-    }
-  }
-}
+const source = await findPresetInsert({ presetId });
 if (source === undefined) {
   console.error(`在 bundle 的 patch 文件里找不到 ${presetId} 的插入行，无法取得保真基线（不猜）`);
   process.exit(1);
 }
+console.log(`保真基线  ${source.sourceLabel} → ${source.rel}`);
 // 组合树可能被后续层改过：逐字（归一化后）比对，确认"源 == 组合"才敢用源做基线。
 if (!deepEqualWithJs(normalizeJs(source.entry.config), normalizeJs(composed.config))) {
   console.error(`${presetId} 在组合树里与源 patch 不一致（有后续层改过它）—— 请人工确认后再生成，本脚本不猜`);

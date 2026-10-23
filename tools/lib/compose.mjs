@@ -1,31 +1,49 @@
 /**
- * 组合层：把 profile 的 bundle patch 依次叠起来，得到与宿主一致的 loader 入口树。
+ * 组合与"源解析"层：把 profile 的 bundle patch 依次叠起来，得到与宿主一致的 loader 入口树。
  *
- * 两个工具共用这份逻辑（只读体检 / 生成 preset 覆盖），避免"两套叠法各自漂移" ——
- * 这类工具一旦与宿主语义分叉，就会给出"看起来对但不对"的结论，比没有工具更糟。
+ * ## 为什么要有"源解析"（0.4.7，真实事故驱动）
  *
- * ## 关键事实（实读源码 + 实测）
+ * 生成 preset 覆盖时必须拿到**宿主真正加载的那份** patch 文件。0.4.5/0.4.6 从
+ * "同版本独立安装"（`D:/Program Files/nodejs/node_modules/@deepseek-ai/dsh`）读基线，
+ * 而那份副本可以被单独更新：宿主把 `presets/standard.patch.yml` 里 persona 的
+ * `suffix: Your working directory is {{cwd}}.` 删掉之后，本地副本一度还是旧的，
+ * 于是生成的覆盖**把 `{{cwd}}` 又写了回去**，宿主报
+ * `unknown prompt variable "{{cwd}}" in section "deployment:persona-suffix"`
+ * —— 整轮直接失败。
  *
- * `applyEntryPatches`（`cordis-plugin-include/lib/index.js`）的 `buildMap` 只递归
- * **`entry.group` 为真且 `config` 是数组** 的"组"；preset 行的子项挂在 `config.plugins`
- * 下，不在递归范围内 ⇒ **preset 内部的行按 id 打补丁打不中**。
+ * ⇒ 基线优先级必须是：**app.asar（宿主真正加载的）** → profile 的 node_modules →
+ * 本地独立安装；并且要拿"影子源"逐文件比文本**显式告警**（同一版本号也可能内容不同，
+ * 只比版本号不够）。
  *
- * ## 为什么读的是"替身"包目录
+ * ## 另一条关键事实（实读源码 + 实测）
  *
- * 桌面版把 `@deepseek-ai/dsh-*` 放在 app.asar 里，profile 的 `node_modules` 下没有副本。
- * 所以本模块按"同版本独立安装"去找这些包（全局 npm 的 `@deepseek-ai/dsh/node_modules`）。
- * 版本一致时读到的 patch 文件与宿主一致；升级主机后应先核对版本。
+ * `applyEntryPatches` 的 `buildMap` 只递归 `entry.group && Array.isArray(entry.config)`
+ * 的"组"；preset 行的子项挂在 `config.plugins` 下 ⇒ **preset 内部的行按 id 打补丁打不中**。
  *
  * @module dsh-memory-win/tools/lib/compose
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, openSync, closeSync, readFileSync, readSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-/** 宿主 `@deepseek-ai/*` 包的默认位置（同版本独立安装的替身）。 */
+/** 宿主 `@deepseek-ai/*` 包的本地独立安装位置（asar 不可用时的兜底）。 */
 export const DSH_MODULES = "D:/Program Files/nodejs/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai";
+
+/** 桌面版 app.asar 的默认位置。 */
+export const APP_ASAR = join(
+  homedir(),
+  "AppData",
+  "Local",
+  "Programs",
+  "DeepSeek Harness",
+  "resources",
+  "app.asar",
+);
+
+/** asar 内宿主包的根（asar 根下就是 `dsh/`）。 */
+const ASAR_DSH_ROOT = "dsh";
 
 /** `!!js` 表达式在 JS 对象里的表示：保留来源文本，dump 时原样写回标签。 */
 export class JsExpr {
@@ -35,6 +53,57 @@ export class JsExpr {
   constructor(src) {
     this.src = src;
   }
+}
+
+/**
+ * 打开 app.asar 的只读读取器（宿主**真正加载**的那份代码）。
+ *
+ * 只读：`openSync(name, "r")` + `readSync`，不写入、不改动安装。
+ *
+ * @param {string} [archive] - asar 路径。
+ * @returns {{label:string, readText:(rel:string)=>string|undefined, list:(dir:string)=>string[], close:()=>void}|undefined} 读取器。
+ */
+export function openAsarReader(archive = process.env.DSH_APP_ASAR ?? APP_ASAR) {
+  if (typeof archive !== "string" || !existsSync(archive)) return undefined;
+  const fd = openSync(archive, "r");
+  let tree;
+  let start;
+  try {
+    const head = Buffer.alloc(16);
+    readSync(fd, head, 0, 16, 0);
+    const json = Buffer.alloc(head.readUInt32LE(12));
+    readSync(fd, json, 0, json.length, 16);
+    tree = JSON.parse(json.toString());
+    start = 8 + head.readUInt32LE(4);
+  } catch {
+    closeSync(fd);
+    return undefined;
+  }
+  const nodeOf = (path) => {
+    if (path === "" || path === undefined) return tree;
+    let entry = tree;
+    for (const part of String(path).split("/")) {
+      if (entry?.files === undefined) return undefined;
+      entry = entry.files[part];
+    }
+    return entry;
+  };
+  return {
+    label: `${archive}（asar）`,
+    readText(rel) {
+      const entry = nodeOf(rel);
+      if (entry === undefined || entry.size === undefined) return undefined;
+      const buffer = Buffer.alloc(entry.size);
+      readSync(fd, buffer, 0, buffer.length, start + Number(entry.offset));
+      return buffer.toString("utf8");
+    },
+    list(dir) {
+      return Object.keys(nodeOf(dir)?.files ?? {});
+    },
+    close() {
+      closeSync(fd);
+    },
+  };
 }
 
 /** yaml 库（懒加载）。 */
@@ -55,8 +124,7 @@ export async function yamlToolkit() {
       instanceOf: JsExpr,
       represent: (value) => value.src,
     });
-    const schema = yaml.DEFAULT_SCHEMA.extend([type]);
-    yamlLib = { yaml, schema };
+    yamlLib = { yaml, schema: yaml.DEFAULT_SCHEMA.extend([type]) };
   }
   return yamlLib;
 }
@@ -69,46 +137,118 @@ export function dshHome() {
 }
 
 /**
- * 读一个 YAML patch 文件并取它的 patch 数组。
+ * 解析一段 YAML patch 文本。
  *
- * @param {string} file - patch 文件绝对路径。
+ * @param {string} text - 文本。
  * @returns {Promise<object[]>} patch 列表。
  */
-export async function loadPatches(file) {
-  if (!existsSync(file)) return [];
+export async function parsePatches(text) {
+  if (typeof text !== "string") return [];
   const { yaml, schema } = await yamlToolkit();
-  const parsed = yaml.load(readFileSync(file, "utf8"), { schema });
+  const parsed = yaml.load(text, { schema });
   return Array.isArray(parsed) ? parsed : [];
 }
 
 /**
- * 从 bundle 包里找它声明的 patch 文件列表。
+ * 读一个文件系统上的 YAML patch 文件。
  *
- * @param {string} pkgDir - 包目录。
- * @returns {string[]} patch 文件绝对路径。
+ * @param {string} file - 路径。
+ * @returns {Promise<object[]>} patch 列表。
  */
-export function bundlePatches(pkgDir) {
-  const pkgFile = join(pkgDir, "package.json");
-  if (!existsSync(pkgFile)) return [];
-  const pkg = JSON.parse(readFileSync(pkgFile, "utf8"));
-  const declared = pkg?.dsh?.bundle?.patch;
-  if (declared === undefined) return [];
-  return (Array.isArray(declared) ? declared : [declared]).map((rel) => join(pkgDir, rel));
+export async function loadPatches(file) {
+  return existsSync(file) ? parsePatches(readFileSync(file, "utf8")) : [];
 }
 
 /**
- * 找 bundle 包目录（profile 优先，其次同版本替身）。
+ * 造一个"目录型"源。
  *
- * @param {string} profileDir - profile 目录。
- * @param {string} bundleName - bundle 包名。
- * @returns {string|undefined} 包目录。
+ * @param {string} dir - 目录。
+ * @param {string} kind - 类型标签（profile / install）。
+ * @returns {object} 源。
  */
-export function bundleDir(profileDir, bundleName) {
-  return [
-    join(profileDir, "node_modules", bundleName),
-    join(dirname(DSH_MODULES), bundleName),
-    join(DSH_MODULES, bundleName),
-  ].find((candidate) => existsSync(join(candidate, "package.json")));
+function dirSource(dir, kind) {
+  return {
+    kind,
+    dir,
+    label: `${dir}（${kind === "profile" ? "profile" : "本地独立安装"}）`,
+    readText(rel) {
+      const file = join(dir, rel);
+      return existsSync(file) ? readFileSync(file, "utf8") : undefined;
+    },
+    list(sub) {
+      try {
+        return readdirSync(join(dir, sub));
+      } catch {
+        return [];
+      }
+    },
+  };
+}
+
+/**
+ * 解析一个 bundle 的源：asar 优先，其次 profile 的 node_modules，最后本地独立安装。
+ *
+ * @param {object} input - 组成。
+ * @param {string} input.profileDir - profile 目录。
+ * @param {string} input.bundleName - bundle 包名。
+ * @param {object|undefined} input.asar - asar 读取器。
+ * @returns {{source:object|undefined, shadow:object|undefined, warnings:string[]}} 源、影子源与告警。
+ */
+export function resolveBundleSource({ profileDir, bundleName, asar }) {
+  const warnings = [];
+  const asarRoot = `${ASAR_DSH_ROOT}/node_modules/${bundleName}`;
+  const candidates = [];
+
+  if (asar !== undefined && typeof asar.readText(`${asarRoot}/package.json`) === "string") {
+    candidates.push({
+      kind: "asar",
+      dir: asarRoot,
+      label: `${asar.label} → ${bundleName}`,
+      readText: (rel) => asar.readText(`${asarRoot}/${rel}`),
+      list: (sub) => asar.list(`${asarRoot}/${sub}`),
+    });
+  }
+  const profilePath = join(profileDir, "node_modules", bundleName);
+  if (existsSync(join(profilePath, "package.json"))) candidates.push(dirSource(profilePath, "profile"));
+  const installPath = join(dirname(DSH_MODULES), bundleName);
+  if (existsSync(join(installPath, "package.json"))) candidates.push(dirSource(installPath, "install"));
+
+  if (candidates.length === 0) return { source: undefined, shadow: undefined, warnings };
+
+  const source = candidates[0];
+  const shadow = candidates.find((candidate) => candidate.kind !== source.kind);
+  if (shadow !== undefined) {
+    for (const rel of bundlePatchPaths(source)) {
+      const a = source.readText(rel);
+      const b = shadow.readText(rel);
+      if (a === undefined || b === undefined) continue;
+      if (a !== b) {
+        warnings.push(
+          `bundle ${bundleName} 的 ${rel} 在「${source.label}」与影子源「${shadow.label}」**内容不一致**` +
+            (source.kind === "asar"
+              ? "（已以 asar 为准；影子源可能过期，别拿它当基线）"
+              : "（⚠️ 基线不是宿主真正加载的那份，先更新本地副本）"),
+        );
+      }
+    }
+  }
+  return { source, shadow, warnings };
+}
+
+/**
+ * 从某 bundle 源里取它声明的 patch 相对路径。
+ *
+ * @param {object} source - bundle 源。
+ * @returns {string[]} 相对路径。
+ */
+export function bundlePatchPaths(source) {
+  const pkgText = source.readText("package.json");
+  if (pkgText === undefined) return [];
+  const declared = JSON.parse(pkgText)?.dsh?.bundle?.patch;
+  if (declared === undefined) return [];
+  return (Array.isArray(declared) ? declared : [declared])
+    .filter((value) => typeof value === "string")
+    .map((value) => value.replace(/^\.\//, ""));
 }
 
 /**
@@ -118,7 +258,7 @@ export function bundleDir(profileDir, bundleName) {
  * @param {string} [options.profileName] - profile 名（默认 desktop）。
  * @param {boolean} [options.withUserPatch] - 是否叠用户的 `cordis.patch.yml`（默认 false）。
  * @param {string[]} [options.extraPatches] - 额外 patch 文件（叠在最后）。
- * @returns {Promise<{data:object[], warnings:string[], applied:object[], profileDir:string, userPatches:object[]}>} 组合结果。
+ * @returns {Promise<object>} 组合结果。
  * @throws {Error} 宿主函数或 profile 不可用时抛出。
  */
 export async function composeLayers(options = {}) {
@@ -133,6 +273,7 @@ export async function composeLayers(options = {}) {
   if (!existsSync(profilePkgFile)) throw new Error(`profile 不存在：${profileDir}`);
   const profilePkg = JSON.parse(readFileSync(profilePkgFile, "utf8"));
 
+  const asar = openAsarReader();
   const warnings = [];
   const warn = (format, ...args) => {
     let index = 0;
@@ -141,28 +282,26 @@ export async function composeLayers(options = {}) {
 
   let data = [];
   const applied = [];
+  const sources = [];
   for (const bundleName of profilePkg?.dsh?.profile?.bundles ?? []) {
-    const pkgDir = bundleDir(profileDir, bundleName);
-    if (pkgDir === undefined) {
-      warnings.push(`bundle ${JSON.stringify(bundleName)} 找不到包目录（跳过它的 patch）`);
+    const resolved = resolveBundleSource({ profileDir, bundleName, asar });
+    warnings.push(...resolved.warnings);
+    if (resolved.source === undefined) {
+      warnings.push(`bundle ${JSON.stringify(bundleName)} 找不到源（跳过它的 patch）`);
       continue;
     }
-    for (const patchFile of bundlePatches(pkgDir)) {
-      const patches = await loadPatches(patchFile);
-      data = applyEntryPatches(data, patches, warn);
-      applied.push({ file: patchFile, patches: patches.length });
+    sources.push({ bundle: bundleName, label: resolved.source.label });
+    for (const rel of bundlePatchPaths(resolved.source)) {
+      data = applyEntryPatches(data, await parsePatches(resolved.source.readText(rel)), warn);
+      applied.push({ file: `${resolved.source.label} → ${rel}`, patches: 1 });
     }
   }
 
-  const userPatchFile = join(profileDir, "cordis.patch.yml");
-  const userPatches = await loadPatches(userPatchFile);
+  const userPatches = await loadPatches(join(profileDir, "cordis.patch.yml"));
   if (withUserPatch) data = applyEntryPatches(data, userPatches, warn);
+  for (const file of extraPatches) data = applyEntryPatches(data, await loadPatches(resolve(file)), warn);
 
-  for (const file of extraPatches) {
-    data = applyEntryPatches(data, await loadPatches(resolve(file)), warn);
-  }
-
-  return { data, warnings, applied, profileDir, userPatches };
+  return { data, warnings, applied, profileDir, userPatches, sources, asar };
 }
 
 /**
@@ -173,6 +312,39 @@ export async function composeLayers(options = {}) {
  */
 export function presetRowsOf(data) {
   return data.filter((entry) => typeof entry?.id === "string" && entry.id.startsWith("preset-"));
+}
+
+/**
+ * 找到某个 preset 行的**源插入处**（保真基线：`!!js` 保留为 `JsExpr`）。
+ *
+ * 逐 bundle、逐 patch 文件找 `insert` 里 id 匹配的那一行，返回它**在哪个源、哪个文件**里 ——
+ * 生成整段覆盖时必须用源定义而不是 structuredClone 之后的组合树（后者会丢类原型）。
+ *
+ * @param {object} input - 组成。
+ * @param {string} input.presetId - preset 行 id（如 `preset-standard`）。
+ * @param {string} [input.profileName] - profile 名。
+ * @returns {Promise<{entry:object, rel:string, sourceLabel:string, warnings:string[]}|undefined>} 源插入处。
+ */
+export async function findPresetInsert({ presetId, profileName = "desktop" }) {
+  const profileDir = join(dshHome(), "profiles", profileName);
+  const profilePkg = JSON.parse(readFileSync(join(profileDir, "package.json"), "utf8"));
+  const asar = openAsarReader();
+  const warnings = [];
+  let found;
+  for (const bundleName of profilePkg?.dsh?.profile?.bundles ?? []) {
+    const resolved = resolveBundleSource({ profileDir, bundleName, asar });
+    warnings.push(...resolved.warnings);
+    if (resolved.source === undefined) continue;
+    for (const rel of bundlePatchPaths(resolved.source)) {
+      for (const patch of await parsePatches(resolved.source.readText(rel))) {
+        const list = Array.isArray(patch?.insert) ? patch.insert : [];
+        for (const entry of list) {
+          if (entry?.id === presetId) found = { entry, rel, sourceLabel: resolved.source.label, warnings };
+        }
+      }
+    }
+  }
+  return found;
 }
 
 /**
