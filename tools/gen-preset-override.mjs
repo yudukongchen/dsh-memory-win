@@ -69,7 +69,7 @@ function normalizeJs(value) {
 
 const argv = process.argv;
 const presetId = argOf(argv, "preset") ?? "preset-cordis";
-const thresholdRatio = Number(argOf(argv, "threshold") ?? 0.75);
+const thresholdRatio = Number(argOf(argv, "threshold") ?? 0.6);
 const retainTokens = Number(argOf(argv, "retain") ?? 8000);
 const maxTokens = Number(argOf(argv, "max") ?? 8000);
 const withConverge = !argv.includes("--no-converge");

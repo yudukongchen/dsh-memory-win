@@ -52,14 +52,14 @@ DSH 桌面版（Windows 优先）的长期记忆插件：纯本地、零依赖�
 
   | profile | 生效实例在哪 | 怎么改 |
   |---|---|---|
-  | web / desktop（`dsh-web-app`） | **每个 agent preset 内部**（`isolate: {compaction: true}`）；宿主平面那条被 `disabled: true` | 覆写 preset 的 `config.plugins`（跟网页版预设编辑器保存出来的形状一致）：把 `thresholdRatio: 0.75` 加到 preset 里那条 `compaction-basic` 上 |
-  | headless 等极简 profile | 顶层（`dsh-base` 那行） | 直接 `- id: compaction-basic` + `config: { thresholdRatio: 0.75 }` |
+  | web / desktop（`dsh-web-app`） | **每个 agent preset 内部**（`isolate: {compaction: true}`）；宿主平面那条被 `disabled: true` | 覆写 preset 的 `config.plugins`（跟网页版预设编辑器保存出来的形状一致）：把 `thresholdRatio: 0.6` 加到 preset 里那条 `compaction-basic` 上 |
+  | headless 等极简 profile | 顶层（`dsh-base` 那行） | 直接 `- id: compaction-basic` + `config: { thresholdRatio: 0.6 }` |
 
   ⚠️ **别照抄成 `- id: compaction-basic` 就以为改上了**：在 web profile 上那个 id 指的是
   **被停用的宿主平面条目**，patch 会静默落到它身上、运行时毫无变化
   （`dsh --dump-config` 里能看到 `disabled: true` 与 config 并存 —— 看着像成功）。
   本机实测过两种：错的写法 `thresholdRatio` 只出现在停用条目上；正确写法下它出现在
-  preset 内的实例上（1M 窗口 → 750k = `min(750k, W−O−65536)`）。
+  preset 内的实例上（1M 窗口 → 629k = `min(W×0.6, W−O−65536)`）。
 
 - **"16k"只能指"消息历史"，不能指整个请求**：压缩永远不缩系统提示词 / 工具声明 /
   会话前缀，本机实测信封（system 1,837 + tools 7,949）≈ **9.8k tokens**，
@@ -239,8 +239,8 @@ summary is not smaller than the shadowed content (5551 >= 5551)
 2. **`messageTokens` 的口径**：`dsh-token-meter` 里 `messageTokens = max(0, surfaceTokens − systemTokens)`，
    即**除系统提示词以外的全部可见表层**（**含工具结果**，**不含**工具定义 —— 后者另计
    `toolsTokens`）。宿主自己的阈值判定用的是 `measurement.totalTokens`（系统 + 工具定义 + 表层），
-   所以"750k 触发"针对的是 `totalTokens`，而本插件的 `compactTargetTokens` 针对 `messageTokens`，
-   两者口径不同、不可直接比较。
+   所以宿主"按阈值触发压缩"量的是 `totalTokens`，而本插件的 `compactTargetTokens` 量的是
+   `messageTokens`，两者口径不同、不可直接比较。
 
 ---
 
@@ -364,7 +364,7 @@ node tools/verify-preset-patches.mjs      # 叠加后看清落点：只有那一
 > 0.4.6 已改为覆盖 `preset-standard`。
 
 生成的覆盖只改两处：`compaction` 组里 `compaction-basic` 的
-`thresholdRatio: 0.75 / retainTokens: 8000 / maxTokens: 8000`，以及追加一行
+`thresholdRatio: 0.6 / retainTokens: 8000 / maxTokens: 8000`，以及追加一行
 `dsh-memory-win-converge`（`name: 'dsh-memory-win'` + `config: { convergeOnly: true }`）。
 
 ⚠️ **代价一：只覆盖一个 preset。** 其它 preset（`cordis` / `ptc`）没有收敛兜底 ——
@@ -610,7 +610,7 @@ agent preset 的隔离作用域内存在，写在一个 inject 里会让**整块
 
 1. **日志不可读**：`session.v4.jsonl.zstd` 是**逐帧** zstd，grep 搜不进去。压缩把历史从
    上下文里拿掉后，想再翻那一段就只能靠工具解码 —— 于是顺手留一份明文 `.jsonl`；
-2. **压缩点是天然快照时机**：750k 触发的那一刻正是"此刻之前的内容值得留档"的判定点。
+2. **压缩点是天然快照时机**：阈值触发的那一刻正是"此刻之前的内容值得留档"的判定点。
 
 落点 `$DSH_HOME/memory-win/session-backups/<sessionId>/`，刻意**不在工作区**（否则仓库内
 grep 会命中重复内容）也**不在 `sessions/` 下**（否则会被会话列表/导出扫成"又一个会话"）。

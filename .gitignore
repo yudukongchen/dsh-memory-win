@@ -15,3 +15,6 @@ dist/
 
 # 生成物/临时文件（tools/gen-preset-override.mjs 的输出等）
 .scratch/
+
+# preset 整段覆盖的生成物（tools/gen-preset-override.mjs --out 的输出）
+preset-*-override.yml

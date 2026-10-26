@@ -254,8 +254,8 @@ export function apply(ctx, config) {
 
   // ── 5b. 压缩守护（0.4.0）：压缩前备份 + 压缩后达标校验 ──────────────────────
   //
-  // 阈值（75% / 750k）**不在这里**：它由宿主 `dsh-compaction-basic` 的
-  // `thresholdRatio` 决定，本插件只当"旁观者"——
+  // 阈值**不在这里**：它由宿主 `dsh-compaction-basic` 的 `thresholdRatio` 决定
+  //（宿主默认 0.8，本机 profile 配成 0.6），本插件只当"旁观者"——
   //   · `compaction/start` → 备份会话日志（明细见 lib/session-backup.js）；
   //   · `compaction/end`   → 量一次消息历史，超标就补一次收敛（lib/compact-guard.js）。
   //
