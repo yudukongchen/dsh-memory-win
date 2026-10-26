@@ -18,3 +18,4 @@ dist/
 
 # preset 整段覆盖的生成物（tools/gen-preset-override.mjs --out 的输出）
 preset-*-override.yml
+.git-commit-msg.tmp
